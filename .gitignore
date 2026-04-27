@@ -1,0 +1,270 @@
+# ============================================
+# GITIGNORE UNIVERSAL - Python/Django/Web Dev
+# ============================================
+
+# --------------------------
+# ENTORNOS VIRTUALES
+# --------------------------
+# Ignora TODOS los entornos virtuales posibles
+.env/
+venv/
+env/
+.venv/
+ENV/
+env.bak/
+venv.bak/
+
+# --------------------------
+# ARCHIVOS PYTHON
+# --------------------------
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# --------------------------
+# DJANGO ESPECÍFICO
+# --------------------------
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+db.sqlite3-*
+media/
+staticfiles/
+*.pot
+*.mo
+
+# --------------------------
+# ARCHIVOS DE ENTORNO/CONFIG
+# --------------------------
+# NUNCA subir contraseñas/API keys
+*.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+.envrc
+.env.*.local
+
+# --------------------------
+# SISTEMA OPERATIVO
+# --------------------------
+# macOS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Windows
+Thumbs.db
+ehthumbs.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# --------------------------
+# IDEs y EDITORES
+# --------------------------
+# VS Code
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# PyCharm/IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+.idea_modules/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Sublime Text
+*.sublime-*
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.session
+.netrwhist
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+
+# --------------------------
+# NODE/NPM (si usas frontend)
+# --------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnp/
+.pnp.js
+*.tsbuildinfo
+
+# --------------------------
+# DOCKER
+# --------------------------
+docker-compose.override.yml
+docker-compose.prod.yml
+docker-data/
+
+# --------------------------
+# BACKUP/TEMPORALES
+# --------------------------
+*~
+*.bak
+*.backup
+*.old
+*.save
+*.orig
+*.rej
+
+# --------------------------
+# LOGS
+# --------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+.log
+logs/
+
+# --------------------------
+# BASE DE DATOS
+# --------------------------
+*.sql
+*.sqlite
+*.sqlite3
+*.db
+*.mdb
+*.dump
+*.rdb
+
+# --------------------------
+# ARCHIVOS DE USUARIO
+# --------------------------
+# Archivos personales del desarrollador
+personal_notes.md
+todo.txt
+test_*.py
+scratch_*.py
+debug_*.py
+
+# --------------------------
+# TESTING/COVERAGE
+# --------------------------
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+test_reports/
+htmlcov/
+
+# --------------------------
+# PAQUETES/PYPI
+# --------------------------
+# Archivos de distribución/paquetes
+*.whl
+*.tar.gz
+*.zip
+*.exe
+
+# --------------------------
+# DOCUMENTACIÓN
+# --------------------------
+docs/_build/
+docs/build/
+docs/source/generated/
+
+# --------------------------
+# MIGRACIONES (OPCIONAL)
+# --------------------------
+# Descomenta si cada dev debe generar sus propias migraciones:
+# */migrations/*
+# !*/migrations/__init__.py
+
+# --------------------------
+# EXCEPCIONES ÚTILES
+# --------------------------
+# Mantener estos archivos de configuración importantes:
+!.vscode/settings.json.example
+!.env.example
+!requirements.example.txt
+!docker-compose.example.yml
+
+# --------------------------
+# PROYECTOS ESPECÍFICOS
+# --------------------------
+# React/Vue/Angular (si tienes frontend)
+/dist/
+/.next/
+/out/
+
+# Flask
+instance/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# --------------------------
+# SEGURIDAD
+# --------------------------
+# Nunca comprometer
+secrets.yml
+secrets.yaml
+credentials.json
+service-account.json
+*.pem
+*.key
+*.crt
+*.cer
+*.pfx
