@@ -1,0 +1,40 @@
+# Ambientes virtuales
+.env
+.venv/
+venv/
+env/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Herramientas y caché
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.tox/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Datos
+data/
+reports/
+!data/.gitkeep
+!reports/.gitkeep
+
+# Docs internos de desarrollo
+AGENT.md
+skills/
+
+# SO
+.DS_Store
+Thumbs.db
