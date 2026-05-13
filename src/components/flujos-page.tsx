@@ -1,11 +1,14 @@
+"use client";
+
 import Link from "next/link";
 import { DashboardShell } from "./dashboard-shell";
 import { Sidebar } from "./sidebar";
 import { Workflow } from "lucide-react";
 import { useTheme } from "../context/theme-context";
+import { FlowTableItem } from "../lib/api";
 
 // ─── Flows Table ─────────────────────────────────────────────────────────────
-function FlowsTable() {
+function FlowsTable({ flows }: { flows: FlowTableItem[] }) {
   const { colors } = useTheme();
 
   const card: React.CSSProperties = {
@@ -14,74 +17,13 @@ function FlowsTable() {
     border: `1px solid ${colors.border}`,
     padding: 24,
   };
-  const flows = [
-    {
-      name: "Devoluciones",
-      conversations: "12.4k",
-      resolution: 58,
-      frustration: 82,
-      abandonment: 47,
-      severity: "crítico",
-      severityBg: "rgba(255,107,107,0.13)",
-      severityColor: "#FF6B6B",
-      href: "/flujos/devoluciones",
-    },
-    {
-      name: "Cambio de plan",
-      conversations: "8.9k",
-      resolution: 62,
-      frustration: 71,
-      abandonment: 38,
-      severity: "alto",
-      severityBg: "rgba(245,166,35,0.13)",
-      severityColor: "#F5A623",
-      href: "#",
-    },
-    {
-      name: "Soporte técnico",
-      conversations: "15.2k",
-      resolution: 71,
-      frustration: 58,
-      abandonment: 29,
-      severity: "medio",
-      severityBg: "rgba(107,147,168,0.13)",
-      severityColor: "#6B93A8",
-      href: "#",
-    },
-    {
-      name: "Facturación",
-      conversations: "6.7k",
-      resolution: 78,
-      frustration: 44,
-      abandonment: 22,
-      severity: "medio",
-      severityBg: "rgba(107,147,168,0.13)",
-      severityColor: "#6B93A8",
-      href: "#",
-    },
-    {
-      name: "Onboarding",
-      conversations: "22.1k",
-      resolution: 88,
-      frustration: 29,
-      abandonment: 12,
-      severity: "bajo",
-      severityBg: "rgba(107,147,168,0.13)",
-      severityColor: "#6B93A8",
-      href: "#",
-    },
-    {
-      name: "Configuración",
-      conversations: "4.3k",
-      resolution: 91,
-      frustration: 24,
-      abandonment: 9,
-      severity: "bajo",
-      severityBg: "rgba(107,147,168,0.13)",
-      severityColor: "#6B93A8",
-      href: "#",
-    },
-  ];
+  if (!flows || flows.length === 0) {
+    return (
+      <div style={card}>
+        <div style={{ color: colors.textMuted, fontSize: 13 }}>No hay datos disponibles.</div>
+      </div>
+    );
+  }
 
   return (
     <div style={card}>
@@ -179,7 +121,7 @@ function FlowsTable() {
 }
 
 // ─── Full Page ────────────────────────────────────────────────────────────────
-export function FlujosPage() {
+export function FlujosPage({ data }: { data: FlowTableItem[] }) {
   const { colors } = useTheme();
 
   return (
@@ -209,7 +151,7 @@ export function FlujosPage() {
           </p>
 
           {/* Flows Table */}
-          <FlowsTable />
+          <FlowsTable flows={data} />
     </DashboardShell>
   );
 }

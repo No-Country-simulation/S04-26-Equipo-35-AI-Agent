@@ -1,16 +1,16 @@
+"use client";
 import { useTheme } from "../context/theme-context";
+import { TrendData } from "../lib/api";
 
-export function TrendChart() {
+export function TrendChart({ data: initialData }: { data?: TrendData[] }) {
   const { colors } = useTheme();
 
-  const data = [
-    { month: "Nov", es: 32, pt: 28 },
-    { month: "Dic", es: 38, pt: 31 },
-    { month: "Ene", es: 35, pt: 33 },
-    { month: "Feb", es: 48, pt: 42 },
-    { month: "Mar", es: 56, pt: 51 },
-    { month: "Abr", es: 64, pt: 58 },
+  const fallbackData = [
+    { month: "Sin datos", es: 0, pt: 0 },
   ];
+
+  const data = initialData && initialData.length > 0 ? initialData : fallbackData;
+  const maxVal = Math.max(...data.map(d => d.es + d.pt), 10);
 
   return (
     <div
@@ -72,11 +72,11 @@ export function TrendChart() {
         {/* Bars */}
         <div style={{ position: "absolute", inset: "0 0 25px 0", display: "flex", alignItems: "flex-end", gap: 16 }}>
           {data.map((d) => {
-            const esHeight = (d.es / 75) * 100;
-            const ptHeight = (d.pt / 75) * 100;
+            const esHeight = (d.es / maxVal) * 100;
+            const ptHeight = (d.pt / maxVal) * 100;
 
             return (
-              <div key={d.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+              <div key={d.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, height: "100%" }}>
                 <div style={{ width: "100%", display: "flex", gap: 4, alignItems: "flex-end", height: "100%" }}>
                   <div
                     style={{

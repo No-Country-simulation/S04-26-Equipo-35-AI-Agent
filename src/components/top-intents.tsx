@@ -1,14 +1,17 @@
+"use client";
+
 import Link from "next/link";
 import { useTheme } from "../context/theme-context";
+import { TopIntent } from "../lib/api";
 
-type Intent = {
+type IntentItem = {
   name: string;
   count: string;
   badge: string;
   href?: string;
 };
 
-export function TopIntents() {
+export function TopIntents({ data }: { data?: TopIntent[] }) {
   const { colors, isDark } = useTheme();
 
   const getBadgeColors = (badge: string) => {
@@ -33,13 +36,17 @@ export function TopIntents() {
     };
   };
 
-  const items: Intent[] = [
-    { name: "Cancelar suscripción", count: "4.2k mensajes afectados", badge: "crítico", href: "/intenciones/cancelar-suscripcion" },
-    { name: "Reembolso parcial", count: "2.8k mensajes afectados", badge: "crítico" },
-    { name: "Portabilidad de datos", count: "1.1k mensajes afectados", badge: "medio" },
-    { name: "Error de pago recurrente", count: "980 mensajes afectados", badge: "medio" },
-    { name: "Cambio de titular", count: "540 mensajes afectados", badge: "bajo" },
+  const fallbackItems: IntentItem[] = [
+    { name: "Sin datos", count: "0 mensajes", badge: "bajo" },
   ];
+
+  const items: IntentItem[] = data && data.length > 0 
+    ? data.map(d => ({
+        name: d.intent.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase()),
+        count: `${d.count} sesiones`,
+        badge: d.count >= 3 ? "crítico" : d.count === 2 ? "medio" : "bajo",
+      }))
+    : fallbackItems;
 
   return (
     <div

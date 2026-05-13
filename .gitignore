@@ -68,9 +68,9 @@ staticfiles/
 .envrc
 .env.*.local
 
-# --------------------------
+# ------------------------------
 # SISTEMA OPERATIVO
-# --------------------------
+# ------------------------------
 # macOS
 .DS_Store
 .DS_Store?
@@ -149,6 +149,7 @@ yarn-error.log*
 docker-compose.override.yml
 docker-compose.prod.yml
 docker-data/
+qdrant_data/
 
 # --------------------------
 # BACKUP/TEMPORALES
@@ -176,6 +177,7 @@ logs/
 # BASE DE DATOS
 # --------------------------
 *.sql
+!**/scripts/setup_tables.sql
 *.sqlite
 *.sqlite3
 *.db

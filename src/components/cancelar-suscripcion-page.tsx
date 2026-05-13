@@ -313,7 +313,7 @@ function ConversationsCard() {
                     lineHeight: 1.6,
                   }}
                 >
-                  "{c.quote}"
+                  &quot;{c.quote}&quot;
                 </p>
               </div>
 

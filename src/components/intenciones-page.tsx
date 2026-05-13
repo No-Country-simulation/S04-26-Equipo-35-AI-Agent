@@ -1,36 +1,52 @@
+"use client";
+
 import Link from "next/link";
 import { DashboardShell } from "./dashboard-shell";
 import { Sidebar } from "./sidebar";
 import { Target } from "lucide-react";
 import { useTheme } from "../context/theme-context";
+import { IntentTableItem } from "../lib/api";
 
 // ─── KPI Row ─────────────────────────────────────────────────────────────────
-function IntencionesKpiRow() {
+function IntencionesKpiRow({ data }: { data: IntentTableItem[] }) {
   const { colors } = useTheme();
+
+  const totalUnresolved = data.length;
+  const totalMessages = data.reduce((acc, curr) => {
+    let msgCount = 0;
+    if (curr.messages.endsWith('k')) {
+      msgCount = parseFloat(curr.messages.replace('k', '')) * 1000;
+    } else {
+      msgCount = parseInt(curr.messages, 10);
+    }
+    return acc + (isNaN(msgCount) ? 0 : msgCount);
+  }, 0);
+  
+  const criticalCount = data.filter(d => d.severity === "critical").length;
 
   const kpis = [
     {
       label: "INTENCIONES SIN RESOLVER",
-      value: "12",
-      delta: "▲ 3 vs mes ant.",
+      value: totalUnresolved.toString(),
+      delta: "Tickets estancados",
       deltaColor: colors.error,
     },
     {
-      label: "MENSAJES TOTALES",
-      value: "9.6k",
-      delta: "Abril 2025",
+      label: "MENSAJES EN ESTAS INTENCIONES",
+      value: totalMessages > 999 ? (totalMessages / 1000).toFixed(1) + 'k' : totalMessages.toString(),
+      delta: "Volumen actual",
       deltaColor: colors.textMuted,
     },
     {
       label: "TASA DE RESOLUCIÓN",
-      value: "18%",
-      delta: "▼ 8%",
+      value: "0%",
+      delta: "Por definición",
       deltaColor: colors.error,
     },
     {
       label: "CRÍTICAS",
-      value: "5",
-      delta: ">85% frustración",
+      value: criticalCount.toString(),
+      delta: ">75% frustración",
       deltaColor: colors.error,
     },
   ];
@@ -71,107 +87,18 @@ function IntencionesKpiRow() {
 }
 
 // ─── Intents Table ───────────────────────────────────────────────────────────
-function IntentsTable() {
+function IntentsTable({ intents }: { intents: IntentTableItem[] }) {
   const { colors, isDark } = useTheme();
 
-  const intents = [
-    {
-      name: "Cancelar suscripción",
-      messages: "4.2k",
-      resolution: 0,
-      frustration: 88,
-      severity: "critical",
-      href: "/intenciones/cancelar-suscripcion",
-    },
-    {
-      name: "Reembolso parcial",
-      messages: "2.8k",
-      resolution: 0,
-      frustration: 85,
-      severity: "critical",
-      href: "#",
-    },
-    {
-      name: "Eliminar cuenta",
-      messages: "1.9k",
-      resolution: 5,
-      frustration: 82,
-      severity: "critical",
-      href: "#",
-    },
-    {
-      name: "Portabilidad de datos",
-      messages: "1.1k",
-      resolution: 12,
-      frustration: 71,
-      severity: "high",
-      href: "#",
-    },
-    {
-      name: "Error de pago recurrente",
-      messages: "980",
-      resolution: 8,
-      frustration: 68,
-      severity: "high",
-      href: "#",
-    },
-    {
-      name: "Cambio de titular",
-      messages: "540",
-      resolution: 22,
-      frustration: 54,
-      severity: "medium",
-      href: "#",
-    },
-    {
-      name: "Actualizar forma de pago",
-      messages: "420",
-      resolution: 35,
-      frustration: 48,
-      severity: "medium",
-      href: "#",
-    },
-    {
-      name: "Cambiar email",
-      messages: "310",
-      resolution: 45,
-      frustration: 39,
-      severity: "medium",
-      href: "#",
-    },
-    {
-      name: "Ver historial",
-      messages: "280",
-      resolution: 58,
-      frustration: 28,
-      severity: "low",
-      href: "#",
-    },
-    {
-      name: "Consulta de saldo",
-      messages: "220",
-      resolution: 72,
-      frustration: 18,
-      severity: "low",
-      href: "#",
-    },
-    {
-      name: "Verificar identidad",
-      messages: "180",
-      resolution: 65,
-      frustration: 24,
-      severity: "low",
-      href: "#",
-    },
-    {
-      name: "Solicitar factura",
-      messages: "140",
-      resolution: 81,
-      frustration: 12,
-      severity: "low",
-      href: "#",
-    },
-  ];
+  if (!intents || intents.length === 0) {
+    return (
+      <div style={{ backgroundColor: colors.card, padding: 24, borderRadius: 12 }}>
+        <div style={{ color: colors.textMuted, fontSize: 13 }}>No hay datos disponibles.</div>
+      </div>
+    );
+  }
+
+
 
   const getSeverityColor = (severity: string) => {
     if (severity === "critical") return colors.error;
@@ -291,7 +218,7 @@ function IntentsTable() {
 }
 
 // ─── Full Page ────────────────────────────────────────────────────────────────
-export function IntencionesPage() {
+export function IntencionesPage({ data }: { data: IntentTableItem[] }) {
   const { colors } = useTheme();
 
   return (
@@ -321,10 +248,10 @@ export function IntencionesPage() {
           </p>
 
           {/* KPI Cards */}
-          <IntencionesKpiRow />
+          <IntencionesKpiRow data={data} />
 
           {/* Intents Table */}
-          <IntentsTable />
+          <IntentsTable intents={data} />
     </DashboardShell>
   );
 }
