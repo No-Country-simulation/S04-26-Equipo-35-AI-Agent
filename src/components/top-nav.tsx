@@ -1,6 +1,8 @@
+"use client";
 import { ChevronDown } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+
 import { useTheme } from "../context/theme-context";
 
 export function TopNav() {

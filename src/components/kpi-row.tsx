@@ -1,15 +1,19 @@
+"use client";
+
 import { useTheme } from "../context/theme-context";
+
+import { GlobalKPIs } from "../lib/api";
 
 type Kpi = { label: string; value: string; delta: string; deltaColor: string };
 
-export function KpiRow() {
+export function KpiRow({ data }: { data?: GlobalKPIs }) {
   const { colors } = useTheme();
 
   const kpis: Kpi[] = [
-    { label: "TASA DE RESOLUCIÓN", value: "64%", delta: "▼ 3% vs mes ant.", deltaColor: colors.error },
-    { label: "ÍNDICE DE FRUSTRACIÓN", value: "31%", delta: "▲ 5% vs mes ant.", deltaColor: colors.error },
-    { label: "INTENCIONES SIN RESOLVER", value: "18", delta: "▲ 2 nuevas", deltaColor: colors.error },
-    { label: "FLUJOS CRÍTICOS", value: "4", delta: "sin cambio", deltaColor: colors.textMuted },
+    { label: "TASA DE RESOLUCIÓN", value: data?.resolutionRate || "0%", delta: "Calculado por IA", deltaColor: colors.textMuted },
+    { label: "ÍNDICE DE FRUSTRACIÓN", value: data?.frustrationIndex || "0/2", delta: "Promedio de la muestra", deltaColor: colors.textMuted },
+    { label: "INTENCIONES SIN RESOLVER", value: data?.unresolvedCount || "0", delta: "Tickets estancados", deltaColor: colors.error },
+    { label: "FLUJOS CRÍTICOS", value: data?.criticalFlows || "0", delta: `${data?.churnRate || 0}% riesgo de churn`, deltaColor: colors.error },
   ];
 
   const cardStyle: React.CSSProperties = {

@@ -1,4 +1,6 @@
+"use client";
 import { LayoutDashboard, AlertTriangle, Target, Upload, Activity, History, FileText } from "lucide-react";
+
 import Link from "next/link";
 import { useTheme } from "../context/theme-context";
 

@@ -86,7 +86,7 @@ function TimelineCard() {
     { pct: 25, color: colors.error, opacity: 1 },           // 75-100 abandono
   ];
 
-  const legend = [
+  const legend: { color: string; label: string; border?: string; opacity?: number }[] = [
     { color: colors.accent, label: "positivo" },
     { color: "#DFF5EF", label: "neutro", border: "1px solid rgba(0,196,154,0.2)" },
     { color: colors.warning, label: "leve frustración", opacity: 0.6 },
@@ -171,8 +171,8 @@ function TimelineCard() {
                 height: 8,
                 borderRadius: "50%",
                 backgroundColor: l.color,
-                opacity: (l as any).opacity ?? 1,
-                border: (l as any).border,
+                opacity: l.opacity ?? 1,
+                border: l.border,
                 flexShrink: 0,
               }}
             />
@@ -309,7 +309,7 @@ function ConversationsCard() {
                     lineHeight: 1.5,
                   }}
                 >
-                  "{c.quote}"
+                  &quot;{c.quote}&quot;
                 </span>
               </div>
               {/* Badge */}

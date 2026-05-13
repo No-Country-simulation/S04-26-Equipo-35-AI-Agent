@@ -3,15 +3,48 @@ ConversaAI Crew — Orquestación principal.
 Ejecutar: python src/crew.py --corpus data/raw/corpus_mes.csv
 """
 import argparse
+import os
 from pathlib import Path
 
 import structlog
 from crewai import Agent, Crew, Process, Task
+from pydantic import BaseModel, Field
+from typing import List
 from dotenv import load_dotenv
+import pandas as pd
+import time
+import math
 
 from src.llm_factory import get_llm
+from src.db.repository import DBRepository
 
-load_dotenv()
+# ── SCHEMAS PYDANTIC ──────────────────────────────────────────────────────────
+
+class MensajeEnriquecido(BaseModel):
+    session_id: str
+    turn_id: int
+    fecha: str
+    region: str
+    texto_espanol: str = ""
+    texto_portugues: str = ""
+    text_clean: str
+    intencion_original: str
+    nivel_frustracion: int
+    es_churn_risk: bool
+    sentiment_label: str = Field(description="frustrado, neutro, satisfecho")
+    sentiment_score: float
+    escalation: bool
+    abandonment_risk: bool
+    intent_label: str
+    intent_confidence: float
+    resolved: bool
+
+class PipelineOutput(BaseModel):
+    mensajes: List[MensajeEnriquecido]
+
+# Cargar .env explícitamente desde la raíz del proyecto Agentes
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(_PROJECT_ROOT / ".env", override=True)
 log = structlog.get_logger()
 
 # ── LLMs ─────────────────────────────────────────────────────────────────────
@@ -136,19 +169,18 @@ analyst_agent = Agent(
 task_etl = Task(
     description=(
         "Lee el corpus desde {corpus_path}. "
-        "Valida columnas: session_id, timestamp, speaker, text. "
-        "Detecta idioma por sesión (es/pt). "
-        "Limpia: timestamps inline, IDs, HTML, URLs → [URL], emojis no informativos. "
+        "Valida columnas reales: session_id, usuario, fecha, region, intencion, nivel_frustracion, texto_espanol, texto_portugues, es_churn_risk. "
+        "Deriva idioma desde region (LATAM/EUROPE=es, BRAZIL=pt). "
+        "Limpia: selecciona texto según región, quita HTML, URLs → [URL], emojis no informativos. "
         "Emojis de frustración (😤😡) → [EMOJI_FRUSTRADO]. "
         "Normaliza: lowercase, espacios múltiples, caracteres repetidos. "
-        "Mapea speaker='system'|'agent' → 'bot'. "
-        "Segmenta en turnos con turn_id incremental por sesión. "
+        "Segmenta en turnos con turn_id incremental por sesión (ordenado por fecha). "
         "Guarda en data/processed/processed_corpus.jsonl"
     ),
     expected_output=(
         "Archivo JSONL en data/processed/processed_corpus.jsonl con schema: "
-        "{session_id, turn_id, speaker: bot|user, text_clean, lang: es|pt}. "
-        "Reporte de estadísticas: total msgs, total sesiones, distribución ES/PT, "
+        "{session_id, turn_id, usuario, fecha, region, lang, text_clean, texto_espanol, texto_portugues, intencion_original, nivel_frustracion, es_churn_risk}. "
+        "Reporte de estadísticas: total msgs, total sesiones, distribución regional, "
         "avg turnos por sesión, msgs descartados."
     ),
     agent=etl_agent,
@@ -157,20 +189,18 @@ task_etl = Task(
 task_sentiment = Task(
     description=(
         "Lee data/processed/processed_corpus.jsonl. "
-        "Para cada turno con speaker=user: "
-        "clasifica sentiment (frustrado/neutro/satisfecho) con score 0-1. "
-        "Marca escalation=True si el score de frustración sube >0.3 en 2 turnos consecutivos "
-        "del mismo usuario, o si usa lenguaje agresivo, o repite misma frase >2 veces. "
+        "Para cada turno (todos son de usuario): "
+        "clasifica sentiment (frustrado/neutro/satisfecho) con score 0-1 usando nivel_frustracion como input adicional. "
+        "Marca escalation=True si el score de frustración sube >0.3 o si nivel_frustracion pasa a 2. "
         "Marca abandonment_risk=True si último turno tiene frustrado con score >0.7 "
-        "y no hay respuesta posterior del usuario. "
-        "Para speaker=bot: campos sentiment en null. "
+        "o si es_churn_risk=True. "
         "Guarda corpus enriquecido y top_frustrated_sessions.csv"
     ),
     expected_output=(
         "JSONL enriquecido con campos: sentiment_label, sentiment_score, escalation, abandonment_risk. "
         "CSV en data/processed/top_frustrated_sessions.csv: "
         "top 50 sesiones por avg_frustration_score DESC. "
-        "Columnas: session_id, avg_frustration_score, max_frustration_score, escalation_count, lang."
+        "Columnas: session_id, avg_frustration_score, max_frustration_score, escalation_count, region."
     ),
     agent=sentiment_agent,
     context=[task_etl],
@@ -178,24 +208,21 @@ task_sentiment = Task(
 
 task_intent = Task(
     description=(
-        "Lee data/processed/processed_corpus.jsonl. "
-        "Para cada turno con speaker=user: "
-        "clasifica intent con estas categorías: consulta_saldo, reporte_problema, "
-        "solicitud_reembolso, cambio_datos, consulta_estado, queja_servicio, "
-        "solicitud_info, cancelacion, otra. "
+        "Lee data/processed/processed_corpus.jsonl enriquecido. "
+        "Para cada turno (todos de usuario): "
+        "clasifica intent con estas categorías (incluyendo logistica_envio, problema_pago). "
+        "Usa intencion_original del CSV como contexto para reclasificar. "
         "confidence < 0.6 → clasificar como 'otra'. "
-        "Marca resolved=False si en los 3 turnos del bot posteriores no hay "
-        "confirmación explícita de resolución, número de ticket, o instrucción clara. "
-        "También resolved=False si el usuario repite la misma intención en la sesión. "
-        "Para speaker=bot: campos intent en null. "
+        "Marca resolved=False si la sesión llega a nivel_frustracion=2, si es_churn_risk=True, "
+        "o si termina con frustración alta. "
         "Genera ranking de intenciones no resueltas."
     ),
     expected_output=(
-        "JSONL enriquecido con campos: intent_label, intent_confidence, resolved. "
-        "JSON en data/processed/unresolved_intents_ranking.json: "
-        "top 10 intents por unresolved_count con campos: "
-        "intent_label, total_occurrences, unresolved_count, unresolved_pct, avg_frustration_when_unresolved."
+        "Objeto JSON estricto con la lista de mensajes enriquecidos. "
+        "Cada mensaje debe incluir sus atributos originales más los calculados: "
+        "intent_label, intent_confidence, y resolved."
     ),
+    output_pydantic=PipelineOutput,
     agent=intent_agent,
     context=[task_etl],
 )
@@ -203,47 +230,66 @@ task_intent = Task(
 task_analyst = Task(
     description=(
         "Combina los outputs de sentiment e intent del corpus enriquecido. "
-        "Calcula métricas globales: tasa de escalada, abandono, resolution rate, "
-        "distribución de sentimiento, ES vs PT. "
-        "Identifica top 5 flujos con mayor frustración (por intent + patrón de bot). "
+        "Calcula métricas globales: tasa de escalada, abandono, resolution rate, churn rate, "
+        "distribución de sentimiento y regiones (LATAM/BRAZIL/EUROPE). "
+        "Identifica top 5 flujos con mayor frustración. "
         "Analiza correlación entre intent no resuelto y frustración. "
-        "Detecta patrones de abandono: turno, intent, diferencias ES/PT. "
+        "Detecta patrones de abandono por región. "
         "Genera recomendaciones priorizadas P1/P2/P3 — concretas, con métrica de éxito. "
         "Formato del reporte: según estructura definida en skills/analyst_agent.md"
     ),
     expected_output=(
         "Reporte Markdown en reports/insights_report.md con: "
         "métricas globales, top 5 flujos frustrantes, top 10 intents no resueltos, "
-        "patrones de abandono, diferencias ES/PT, recomendaciones P1/P2/P3. "
+        "patrones de abandono, diferencias por región, recomendaciones P1/P2/P3. "
         "JSON en data/processed/metrics_summary.json para el dashboard."
     ),
     agent=analyst_agent,
     context=[task_sentiment, task_intent],
 )
 
-# ── CREW ──────────────────────────────────────────────────────────────────────
+# ── CREWS ──────────────────────────────────────────────────────────────────────
 
-crew = Crew(
-    agents=[etl_agent, sentiment_agent, intent_agent, analyst_agent],
-    tasks=[task_etl, task_sentiment, task_intent, task_analyst],
+ingestion_crew = Crew(
+    agents=[etl_agent, sentiment_agent, intent_agent],
+    tasks=[task_etl, task_sentiment, task_intent],
+    process=Process.sequential,
+    verbose=True,
+)
+
+analyst_crew = Crew(
+    agents=[analyst_agent],
+    tasks=[task_analyst],
     process=Process.sequential,
     verbose=True,
 )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="ConversaAI Crew")
+    parser = argparse.ArgumentParser(description="ConversaAI Crew Ingestion")
     parser.add_argument(
         "--corpus",
         type=str,
-        default="data/raw/corpus_mes.csv",
+        default=os.getenv("CORPUS_PATH", "data/raw/data_conversa_ai.csv"),
         help="Path al corpus CSV mensual",
     )
     parser.add_argument(
-        "--smart-recommendations",
+        "--use-db",
         action="store_true",
         default=False,
-        help="Usar LLM para generar recomendaciones inteligentes (requiere API credits)",
+        help="Persistir datos en Supabase (SQL) y Qdrant (vectorial).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=50,
+        help="Tamaño de cada lote de filas a procesar.",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Límite máximo de filas a procesar (0 = todas).",
     )
     args = parser.parse_args()
 
@@ -252,18 +298,85 @@ def main() -> None:
         log.error("corpus_not_found", path=str(corpus_path))
         raise FileNotFoundError(f"Corpus no encontrado: {corpus_path}")
 
-    log.info(
-        "crew_starting",
-        corpus=str(corpus_path),
-        smart_recommendations=args.smart_recommendations,
-    )
-    result = crew.kickoff(inputs={
-        "corpus_path": str(corpus_path),
-        "smart_recommendations": args.smart_recommendations,
-    })
-    log.info("crew_completed")
-    log.info("crew_result", result=str(result))
+    log.info("Cargando corpus completo...", corpus=str(corpus_path))
+    df = pd.read_csv(corpus_path)
+    
+    if args.limit > 0:
+        df = df.head(args.limit)
+        
+    total_rows = len(df)
+    batch_size = args.batch_size
+    total_batches = math.ceil(total_rows / batch_size)
+    
+    log.info(f"Total filas: {total_rows}. Procesando en {total_batches} lotes de {batch_size}.")
+    
+    repo = DBRepository() if args.use_db else None
+    
+    for i in range(total_batches):
+        batch_df = df.iloc[i*batch_size : (i+1)*batch_size]
+        temp_path = Path(f"data/raw/temp_batch_{i}.csv")
+        batch_df.to_csv(temp_path, index=False)
+        
+        log.info(f"--- Iniciando Lote {i+1}/{total_batches} ({len(batch_df)} filas) ---")
+        
+        try:
+            _ = ingestion_crew.kickoff(inputs={
+                "corpus_path": str(temp_path),
+            })
+            
+            if repo:
+                output_data = task_intent.output.pydantic
+                if output_data and hasattr(output_data, "mensajes"):
+                    session_cache = {}
+                    for msg in output_data.mensajes:
+                        sess_id = msg.session_id
+                        if sess_id not in session_cache:
+                            session_cache[sess_id] = {
+                                "id": sess_id,
+                                "usuario": "Usuario_Test",
+                                "region": msg.region,
+                                "total_turns": 0,
+                                "avg_frustration_score": 0.0,
+                                "max_frustration_score": 0.0,
+                                "has_escalation": False,
+                                "has_abandonment": False,
+                                "dominant_intent": msg.intent_label,
+                                "resolution_rate": 1.0 if msg.resolved else 0.0,
+                                "is_churn_risk": msg.es_churn_risk
+                            }
+                        
+                        session_cache[sess_id]["total_turns"] += 1
+                        session_cache[sess_id]["has_escalation"] |= msg.escalation
+                        session_cache[sess_id]["has_abandonment"] |= msg.abandonment_risk
+                        
+                        frust_val = min(int(msg.nivel_frustracion), 2)
+                        if frust_val > session_cache[sess_id]["max_frustration_score"]:
+                            session_cache[sess_id]["max_frustration_score"] = float(frust_val)
+                            
+                    for sess_data in session_cache.values():
+                        repo.save_session(sess_data)
+                        
+                    for msg in output_data.mensajes:
+                        msg_dict = msg.dict()
+                        msg_dict["nivel_frustracion"] = min(int(msg_dict["nivel_frustracion"]), 2)
+                        repo.save_message(msg_dict)
+                        
+                    log.info(f"Lote {i+1} guardado exitosamente: {len(output_data.mensajes)} mensajes procesados.")
+                else:
+                    log.warning(f"Lote {i+1}: No se pudo obtener output Pydantic estructurado de la tarea de Intent.")
+        except Exception as e:
+            log.error(f"Error procesando lote {i+1}: {e}")
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+                
+        if i < total_batches - 1:
+            log.info("Pausando 5 segundos para respetar los Rate Limits de la API...")
+            time.sleep(5)
+
+    log.info("Procesamiento por lotes finalizado completamente.")
 
 
 if __name__ == "__main__":
     main()
+

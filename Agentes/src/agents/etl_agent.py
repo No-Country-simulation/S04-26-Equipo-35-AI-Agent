@@ -1,21 +1,25 @@
 """
 ETL Agent — Limpieza y normalización del corpus de soporte.
 
-Lee el CSV mensual crudo, limpia y normaliza los mensajes en ES/PT,
-segmenta en turnos y escribe data/processed/processed_corpus.jsonl.
+Lee el CSV real (data_conversa_ai.csv) con columnas:
+  session_id, usuario, fecha, region, intencion, nivel_frustracion,
+  texto_espanol, texto_portugues, es_churn_risk
 
-Leer skills/skill_etl.md antes de modificar este archivo.
+Limpia y normaliza los textos bilingües, selecciona el texto principal
+según la región (ES para LATAM/EUROPE, PT para BRAZIL), y escribe
+el corpus procesado en JSONL.
+
+Cuando use_db=True, persiste a Supabase y Qdrant.
 """
-import asyncio
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import Literal
 
 import pandas as pd
 import structlog
-from langdetect import LangDetectException, detect
-from pydantic import BaseModel, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 log = structlog.get_logger()
 
@@ -27,9 +31,16 @@ class ProcessedTurn(BaseModel):
 
     session_id: str
     turn_id: int
-    speaker: Literal["user", "bot"]
-    text_clean: str
+    usuario: str
+    fecha: str
+    region: Literal["LATAM", "BRAZIL", "EUROPE"]
     lang: Literal["es", "pt"]
+    text_clean: str
+    texto_espanol: str = ""
+    texto_portugues: str = ""
+    intencion_original: str = ""
+    nivel_frustracion: int = Field(ge=0, le=2)
+    es_churn_risk: bool = False
 
     @field_validator("text_clean")
     @classmethod
@@ -39,13 +50,20 @@ class ProcessedTurn(BaseModel):
         return v
 
 
-# ── Columnas requeridas ──────────────────────────────────────────────────────
+# ── Columnas requeridas del CSV real ─────────────────────────────────────────
 
-REQUIRED_COLUMNS = {"session_id", "timestamp", "speaker", "text"}
+REQUIRED_COLUMNS = {
+    "session_id", "usuario", "fecha", "region", "intencion",
+    "nivel_frustracion", "texto_espanol", "texto_portugues", "es_churn_risk",
+}
 
-# ── Mapeo de speaker ─────────────────────────────────────────────────────────
+# ── Mapeo region → idioma ────────────────────────────────────────────────────
 
-SPEAKER_MAP = {"system": "bot", "agent": "bot", "bot": "bot", "user": "user"}
+REGION_LANG_MAP: dict[str, Literal["es", "pt"]] = {
+    "LATAM": "es",
+    "BRAZIL": "pt",
+    "EUROPE": "es",  # Default a español para Europa
+}
 
 # ── Regex de limpieza (orden importa) ────────────────────────────────────────
 
@@ -67,14 +85,14 @@ _ALL_EMOJIS = re.compile(
 )
 
 _CLEANING_PATTERNS: list[tuple[re.Pattern[str], str]] = [
-    # 1. Timestamps inline: [12:34] o [12:34:56]
+    # Timestamps inline: [12:34] o [12:34:56]
     (re.compile(r"\[\d{1,2}:\d{2}(:\d{2})?\]"), ""),
-    # 2. IDs embebidos: #SES-12345, TICKET-123
+    # IDs embebidos: #SES-12345, TICKET-123
     (re.compile(r"#[A-Z]+-\d+"), ""),
-    # 3. HTML tags y entidades
+    # HTML tags y entidades
     (re.compile(r"<[^>]+>"), ""),
     (re.compile(r"&\w+;"), ""),
-    # 4. URLs → [URL]
+    # URLs → [URL]
     (re.compile(r"https?://\S+"), "[URL]"),
 ]
 
@@ -89,21 +107,10 @@ _MULTIPLE_SPACES = re.compile(r"\s+")
 
 
 def _clean_text(text: str) -> str:
-    """
-    Aplica pipeline de limpieza en el orden definido por skill_etl.md.
+    """Aplica pipeline de limpieza al texto."""
+    if not text or not isinstance(text, str):
+        return ""
 
-    Orden:
-    1. Timestamps inline
-    2. IDs embebidos
-    3. HTML tags/entidades
-    4. URLs → [URL]
-    5. Emojis frustración → [EMOJI_FRUSTRADO]
-    6. Resto de emojis → ""
-    7. Caracteres repetidos
-    8. Lowercase
-    9. Espacios múltiples → " "
-    10. Strip
-    """
     # Patrones secuenciales
     for pattern, replacement in _CLEANING_PATTERNS:
         text = pattern.sub(replacement, text)
@@ -126,113 +133,92 @@ def _clean_text(text: str) -> str:
     return text.strip()
 
 
-def _map_speaker(speaker: str) -> str | None:
-    """Mapea speaker al valor normalizado. Retorna None si no es válido."""
-    return SPEAKER_MAP.get(speaker.lower().strip())
-
-
-def _detect_session_language(texts: list[str]) -> Literal["es", "pt"]:
+def _select_text_by_region(row: pd.Series) -> str:
     """
-    Detecta el idioma dominante de una sesión.
+    Selecciona el texto principal según la región.
 
-    Si >70% de los mensajes detectables son de un idioma, asigna ese.
-    Default: 'es' si no se puede determinar.
+    LATAM/EUROPE → texto_espanol
+    BRAZIL → texto_portugues
     """
-    lang_counts: dict[str, int] = {"es": 0, "pt": 0}
-    total_detected = 0
+    region = str(row.get("region", "LATAM")).upper()
+    if region == "BRAZIL":
+        text = row.get("texto_portugues", "")
+    else:
+        text = row.get("texto_espanol", "")
 
-    for text in texts:
-        if not text or len(text.strip()) < 3:
-            continue
-        try:
-            detected = detect(text)
-            if detected in lang_counts:
-                lang_counts[detected] += 1
-                total_detected += 1
-        except LangDetectException:
-            continue
+    # Fallback: si el texto seleccionado está vacío, usar el otro
+    if not text or (isinstance(text, float) and pd.isna(text)):
+        text = row.get("texto_espanol", "") or row.get("texto_portugues", "")
 
-    if total_detected == 0:
-        return "es"
-
-    for lang, count in lang_counts.items():
-        if count / total_detected > 0.7:
-            return lang  # type: ignore[return-value]
-
-    # Si no hay idioma dominante, usar el más frecuente
-    return max(lang_counts, key=lang_counts.get)  # type: ignore[arg-type,return-value]
+    return str(text) if text and not (isinstance(text, float) and pd.isna(text)) else ""
 
 
 # ── Pipeline principal ───────────────────────────────────────────────────────
 
 
-async def run_etl_pipeline(corpus_path: str) -> dict[str, int | float]:
+async def run_etl_pipeline(
+    corpus_path: str,
+    use_db: bool = False,
+) -> dict[str, int | float]:
     """
-    Ejecuta el pipeline ETL completo sobre el corpus.
+    Ejecuta el pipeline ETL sobre el corpus real.
 
     Args:
-        corpus_path: Path al CSV mensual de entrada.
+        corpus_path: Path al CSV (data_conversa_ai.csv).
+        use_db: Si True, persiste a Supabase y Qdrant.
 
     Returns:
-        Diccionario con estadísticas: total_msgs, total_sessions,
-        pct_es, pct_pt, avg_turns_per_session, discarded_msgs.
+        Estadísticas del procesamiento.
     """
     path = Path(corpus_path)
     if not path.exists():
         raise FileNotFoundError(f"Corpus no encontrado: {path}")
 
-    log.info("etl_starting", corpus_path=str(path))
+    log.info("etl_starting", corpus_path=str(path), use_db=use_db)
 
     # 1. Cargar CSV y validar columnas
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, encoding="utf-8-sig")  # utf-8-sig maneja BOM
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
         raise RuntimeError(f"Columnas faltantes en corpus: {missing}")
 
-    initial_count = len(df)
     discarded = 0
 
-    # 2. Mapear speaker → normalizar
-    df["speaker_mapped"] = df["speaker"].apply(_map_speaker)
-    invalid_speakers = df["speaker_mapped"].isna()
-    if invalid_speakers.any():
-        invalid_count = invalid_speakers.sum()
-        for _, row in df[invalid_speakers].iterrows():
-            log.warning(
-                "speaker_invalido",
-                session_id=row["session_id"],
-                speaker=row["speaker"],
-            )
-        df = df[~invalid_speakers].copy()
-        discarded += invalid_count
+    # 2. Normalizar región
+    df["region"] = df["region"].str.upper().str.strip()
+    invalid_regions = ~df["region"].isin(REGION_LANG_MAP.keys())
+    if invalid_regions.any():
+        count = int(invalid_regions.sum())
+        log.warning("regiones_invalidas_descartadas", count=count)
+        df = df[~invalid_regions].copy()
+        discarded += count
 
-    df["speaker"] = df["speaker_mapped"]
-    df = df.drop(columns=["speaker_mapped"])
+    # 3. Derivar idioma desde región
+    df["lang"] = df["region"].map(REGION_LANG_MAP)
 
-    # 3. Detectar idioma por sesión
-    session_texts = df.groupby("session_id")["text"].apply(list)
-    session_langs = {
-        sid: _detect_session_language(texts)
-        for sid, texts in session_texts.items()
-    }
+    # 4. Seleccionar texto principal y limpiar
+    df["text_raw"] = df.apply(_select_text_by_region, axis=1)
+    df["text_clean"] = df["text_raw"].apply(_clean_text)
 
-    # 4. Limpiar texto
-    df["text_clean"] = df["text"].apply(_clean_text)
-
-    # 5. Descartar turnos con text_clean vacío
+    # 5. Descartar filas con texto vacío
     empty_mask = df["text_clean"].str.strip() == ""
     if empty_mask.any():
-        empty_count = empty_mask.sum()
-        log.info("turnos_vacios_descartados", count=int(empty_count))
+        empty_count = int(empty_mask.sum())
+        log.info("turnos_vacios_descartados", count=empty_count)
         df = df[~empty_mask].copy()
         discarded += empty_count
 
-    # 6. Asignar turn_id incremental por sesión
-    df = df.sort_values(["session_id", "timestamp"]).reset_index(drop=True)
+    # 6. Asignar turn_id incremental por sesión (ordenado por fecha)
+    df = df.sort_values(["session_id", "fecha"]).reset_index(drop=True)
     df["turn_id"] = df.groupby("session_id").cumcount()
 
-    # 7. Asignar idioma de sesión
-    df["lang"] = df["session_id"].map(session_langs)
+    # 7. Normalizar tipos
+    df["es_churn_risk"] = df["es_churn_risk"].astype(bool)
+    df["nivel_frustracion"] = df["nivel_frustracion"].fillna(0).astype(int)
+    df["texto_espanol"] = df["texto_espanol"].fillna("")
+    df["texto_portugues"] = df["texto_portugues"].fillna("")
+    df["intencion"] = df["intencion"].fillna("otra")
+    df["usuario"] = df["usuario"].fillna("unknown")
 
     # 8. Validar con Pydantic y escribir JSONL
     output_dir = Path("data/processed")
@@ -247,9 +233,16 @@ async def run_etl_pipeline(corpus_path: str) -> dict[str, int | float]:
             turn = ProcessedTurn(
                 session_id=row["session_id"],
                 turn_id=int(row["turn_id"]),
-                speaker=row["speaker"],
-                text_clean=row["text_clean"],
+                usuario=row["usuario"],
+                fecha=str(row["fecha"]),
+                region=row["region"],
                 lang=row["lang"],
+                text_clean=row["text_clean"],
+                texto_espanol=row["texto_espanol"],
+                texto_portugues=row["texto_portugues"],
+                intencion_original=row["intencion"],
+                nivel_frustracion=int(row["nivel_frustracion"]),
+                es_churn_risk=bool(row["es_churn_risk"]),
             )
             valid_turns.append(turn.model_dump())
         except ValidationError as e:
@@ -268,29 +261,132 @@ async def run_etl_pipeline(corpus_path: str) -> dict[str, int | float]:
 
     # 9. Calcular estadísticas
     total_sessions = df["session_id"].nunique()
-    lang_counts = df["lang"].value_counts()
-    total_with_lang = lang_counts.sum()
+    region_counts = df["region"].value_counts()
 
     stats: dict[str, int | float] = {
         "total_msgs": len(valid_turns),
         "total_sessions": total_sessions,
-        "pct_es": round(
-            (lang_counts.get("es", 0) / total_with_lang * 100)
-            if total_with_lang > 0
-            else 0,
-            1,
-        ),
-        "pct_pt": round(
-            (lang_counts.get("pt", 0) / total_with_lang * 100)
-            if total_with_lang > 0
-            else 0,
-            1,
-        ),
+        "pct_latam": round(
+            region_counts.get("LATAM", 0) / len(df) * 100, 1
+        ) if len(df) > 0 else 0,
+        "pct_brazil": round(
+            region_counts.get("BRAZIL", 0) / len(df) * 100, 1
+        ) if len(df) > 0 else 0,
+        "pct_europe": round(
+            region_counts.get("EUROPE", 0) / len(df) * 100, 1
+        ) if len(df) > 0 else 0,
         "avg_turns_per_session": round(
             len(valid_turns) / total_sessions if total_sessions > 0 else 0, 1
         ),
         "discarded_msgs": discarded,
     }
 
+    # 10. Persistir a bases de datos
+    if use_db:
+        await _persist_to_databases(valid_turns)
+
     log.info("etl_completado", **stats)
     return stats
+
+
+# ── Persistencia a bases de datos ────────────────────────────────────────────
+
+
+async def _persist_to_databases(valid_turns: list[dict]) -> None:
+    """
+    Persiste los datos limpios a Supabase (SQL) y Qdrant (vectorial).
+    """
+    from qdrant_client.models import PointStruct
+
+    from src.db.embeddings import embed_texts
+    from src.db.qdrant_store import (
+        COLLECTION_NAME,
+        ensure_collection_exists,
+        get_qdrant,
+    )
+    from src.db.supabase_client import get_supabase
+
+    log.info("db_persist_starting", total_turns=len(valid_turns))
+
+    sb = get_supabase()
+    qdrant = get_qdrant()
+    ensure_collection_exists(qdrant)
+
+    # ── 1. Insertar sesiones ─────────────────────────────────────────────
+    sessions_map: dict[str, dict] = {}
+    for turn in valid_turns:
+        sid = turn["session_id"]
+        if sid not in sessions_map:
+            sessions_map[sid] = {
+                "id": sid,
+                "usuario": turn["usuario"],
+                "region": turn["region"],
+                "total_turns": 0,
+                "is_churn_risk": turn["es_churn_risk"],
+            }
+        sessions_map[sid]["total_turns"] += 1
+
+    session_rows = list(sessions_map.values())
+    if session_rows:
+        sb.table("sessions").upsert(session_rows, on_conflict="id").execute()
+        log.info("db_sessions_upserted", count=len(session_rows))
+
+    # ── 2. Insertar mensajes ─────────────────────────────────────────────
+    message_rows: list[dict] = []
+    user_texts: list[str] = []
+    user_point_ids: list[str] = []
+    user_metadata: list[dict] = []
+
+    for turn in valid_turns:
+        point_id = str(uuid.uuid4())
+        user_texts.append(turn["text_clean"])
+        user_point_ids.append(point_id)
+        user_metadata.append({
+            "session_id": turn["session_id"],
+            "turn_id": turn["turn_id"],
+            "lang": turn["lang"],
+            "region": turn["region"],
+            "text_preview": turn["text_clean"][:200],
+            "intencion_original": turn["intencion_original"],
+            "nivel_frustracion": turn["nivel_frustracion"],
+        })
+
+        message_rows.append({
+            "session_id": turn["session_id"],
+            "turn_id": turn["turn_id"],
+            "fecha": turn["fecha"],
+            "region": turn["region"],
+            "texto_espanol": turn["texto_espanol"],
+            "texto_portugues": turn["texto_portugues"],
+            "text_clean": turn["text_clean"],
+            "intencion_original": turn["intencion_original"],
+            "nivel_frustracion": turn["nivel_frustracion"],
+            "es_churn_risk": turn["es_churn_risk"],
+            "qdrant_point_id": point_id,
+        })
+
+    # Upsert en batches de 500
+    batch_size = 500
+    for i in range(0, len(message_rows), batch_size):
+        batch = message_rows[i : i + batch_size]
+        sb.table("messages").upsert(
+            batch, on_conflict="session_id,turn_id"
+        ).execute()
+    log.info("db_messages_upserted", count=len(message_rows))
+
+    # ── 3. Embeddings + Qdrant ───────────────────────────────────────────
+    if user_texts:
+        vectors = embed_texts(user_texts)
+        points = [
+            PointStruct(id=pid, vector=vec, payload=meta)
+            for pid, vec, meta in zip(user_point_ids, vectors, user_metadata)
+        ]
+        qdrant_batch = 100
+        for i in range(0, len(points), qdrant_batch):
+            qdrant.upsert(
+                collection_name=COLLECTION_NAME,
+                points=points[i : i + qdrant_batch],
+            )
+        log.info("qdrant_points_upserted", count=len(points))
+
+    log.info("db_persist_completed")

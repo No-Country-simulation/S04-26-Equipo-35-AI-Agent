@@ -3,6 +3,10 @@ Corpus Loader — Utilidad para carga y validación del corpus CSV.
 
 Funciones compartidas para cargar, validar y preprocesar el corpus
 de conversaciones antes de ser procesado por el pipeline.
+
+Columnas requeridas del CSV real:
+  session_id, usuario, fecha, region, intencion, nivel_frustracion,
+  texto_espanol, texto_portugues, es_churn_risk
 """
 from pathlib import Path
 from typing import Any
@@ -12,7 +16,10 @@ import structlog
 
 log = structlog.get_logger()
 
-REQUIRED_COLUMNS = {"session_id", "timestamp", "speaker", "text"}
+REQUIRED_COLUMNS = {
+    "session_id", "usuario", "fecha", "region", "intencion",
+    "nivel_frustracion", "texto_espanol", "texto_portugues", "es_churn_risk",
+}
 
 
 def load_corpus(corpus_path: str | Path) -> pd.DataFrame:
@@ -34,7 +41,7 @@ def load_corpus(corpus_path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"Corpus no encontrado: {path}")
 
     log.info("corpus_loading", path=str(path))
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, encoding="utf-8-sig")
 
     missing = REQUIRED_COLUMNS - set(df.columns)
     if missing:
@@ -103,24 +110,26 @@ def get_corpus_stats(df: pd.DataFrame) -> dict[str, Any]:
         df: DataFrame con el corpus (cualquier etapa).
 
     Returns:
-        Dict con estadísticas: total_rows, total_sessions,
-        speakers, date_range.
+        Dict con estadísticas del corpus.
     """
     stats: dict[str, Any] = {
         "total_rows": len(df),
         "total_sessions": int(df["session_id"].nunique()),
     }
 
-    if "speaker" in df.columns:
-        stats["speakers"] = df["speaker"].value_counts().to_dict()
+    if "region" in df.columns:
+        stats["regions"] = df["region"].value_counts().to_dict()
 
-    if "timestamp" in df.columns:
+    if "fecha" in df.columns:
         stats["date_range"] = {
-            "min": str(df["timestamp"].min()),
-            "max": str(df["timestamp"].max()),
+            "min": str(df["fecha"].min()),
+            "max": str(df["fecha"].max()),
         }
 
-    if "lang" in df.columns:
-        stats["languages"] = df["lang"].value_counts().to_dict()
+    if "intencion" in df.columns:
+        stats["intenciones"] = df["intencion"].value_counts().to_dict()
+
+    if "nivel_frustracion" in df.columns:
+        stats["frustracion_promedio"] = round(float(df["nivel_frustracion"].mean()), 2)
 
     return stats

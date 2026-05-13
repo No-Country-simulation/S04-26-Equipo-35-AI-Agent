@@ -307,9 +307,9 @@ function Estado3() {
             lineHeight: 1.6,
           }}
         >
-          <div>· Fila 14.832: columna "timestamp" vacía — requerida</div>
-          <div>· Fila 89.201: "lang" contiene valor no reconocido: "br"</div>
-          <div>· Columna "conversation_id" ausente en el archivo</div>
+          <div>· Fila 14.832: columna &quot;timestamp&quot; vacía — requerida</div>
+          <div>· Fila 89.201: &quot;lang&quot; contiene valor no reconocido: &quot;br&quot;</div>
+          <div>· Columna &quot;conversation_id&quot; ausente en el archivo</div>
         </div>
       </div>
 

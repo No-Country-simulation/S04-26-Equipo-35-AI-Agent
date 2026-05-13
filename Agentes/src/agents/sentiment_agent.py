@@ -1,17 +1,19 @@
 """
 Sentiment Agent — Clasificación emocional del corpus.
 
-Lee processed_corpus.jsonl, clasifica el tono emocional de cada turno
-del usuario (frustrado/neutro/satisfecho), detecta escalada y riesgo
-de abandono.
+Lee processed_corpus.jsonl (todos los mensajes son de usuarios),
+clasifica el tono emocional (frustrado/neutro/satisfecho), y detecta
+escalada y riesgo de abandono.
 
-Leer skills/skill_sentiment.md antes de modificar este archivo.
+Aprovecha nivel_frustracion (0-2) del CSV como señal adicional
+para calibrar la clasificación del LLM.
+
+Cuando use_db=True, persiste resultados a Supabase.
 """
-import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pandas as pd
 import structlog
@@ -43,9 +45,10 @@ SENTIMENT_PROMPT = """
 Eres una psicóloga organizacional experta en análisis emocional de conversaciones
 de soporte al cliente en español LATAM y portugués brasileño.
 
-Clasifica el sentimiento del siguiente mensaje de un USUARIO (no del bot).
+Clasifica el sentimiento del siguiente mensaje de un usuario.
 
 Mensaje: {text}
+Nivel de frustración preexistente (0=bajo, 1=medio, 2=alto): {nivel_frustracion}
 
 Responde SOLO con JSON válido, sin explicación:
 {{
@@ -59,34 +62,30 @@ Responde SOLO con JSON válido, sin explicación:
 - 0.3-0.4: Molestia leve → "no funciona", "no carga"
 - 0.5-0.6: Frustración clara → "ya les dije", "no me entienden"
 - 0.7-0.8: Ira contenida → "esto es inaceptable", "llevo 3 días"
-- 0.9-1.0: Ira explosiva → "PÉSIMO", "ES UN ROBO", "🤬", insultos
+- 0.9-1.0: Ira explosiva → "PÉSIMO", "ES UN ROBO", insultos
 
 ### neutro
 - 0.4-0.6: Sin carga emocional → "cuánto debo", "quiero saber mi saldo"
 
 ### satisfecho
 - 0.6-0.7: Aceptación → "ok, gracias"
-- 0.8-0.9: Alivio/gratitud → "perfecto, funcionó", "excelente servicio"
-- 1.0: Entusiasmo → "increíble, gracias!!!"
+- 0.8-1.0: Gratitud → "perfecto, funcionó", "excelente servicio"
 
 ## Señales Clave (ES LATAM)
 - "no sirve", "pésimo", "qué mal" → frustrado
-- "ya chole" (MX), "qué vaina" (CO), "qué mierda" (AR) → frustrado 0.7+
-- "llevo X días/horas" → frustrado (la espera amplifica)
+- "ya chole" (MX), "qué vaina" (CO) → frustrado 0.7+
 - MAYÚSCULAS SOSTENIDAS → subir score +0.2
 - Signos repetidos "???" "!!!" → subir score +0.1
-- Emoji 😤😡🤬 → frustrado con score 0.7+
 
 ## Señales Clave (PT-BR)
 - "não funciona", "horrível", "que absurdo" → frustrado
 - "péssimo atendimento" → frustrado 0.8+
-- "me enganaram", "é fraude" → frustrado 0.9+
 - "obrigado", "funcionou", "resolvido" → satisfecho
 
-## Trampas Comunes (EVITAR)
-- "ok" solo → puede ser resignación (neutro 0.4) si viene después de frustración
-- "entiendo" → neutro, NO satisfecho
-- Pregunta con "?" → generalmente neutro, a menos que haya signos de irritación
+## IMPORTANTE
+- El nivel de frustración preexistente es una señal adicional:
+  nivel 0 = probablemente neutro, nivel 2 = probablemente frustrado alto
+- Tu clasificación debe basarse PRINCIPALMENTE en el texto
 """
 
 
@@ -95,22 +94,26 @@ Responde SOLO con JSON válido, sin explicación:
 
 async def _classify_sentiment_batch(
     texts: list[str],
+    niveles: list[int],
 ) -> list[SentimentResult]:
     """
     Clasifica sentimiento para un batch de textos usando el LLM.
 
     Args:
         texts: Lista de textos a clasificar.
+        niveles: Lista de niveles de frustración (0-2) del CSV.
 
     Returns:
-        Lista de SentimentResult, uno por texto.
+        Lista de SentimentResult.
     """
     llm = get_llm(role="smart")
     results: list[SentimentResult] = []
 
-    for text in texts:
+    for text, nivel in zip(texts, niveles):
         try:
-            prompt = SENTIMENT_PROMPT.format(text=text)
+            prompt = SENTIMENT_PROMPT.format(
+                text=text, nivel_frustracion=nivel,
+            )
             response = llm.invoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
 
@@ -121,14 +124,21 @@ async def _classify_sentiment_batch(
             )
         except (json.JSONDecodeError, ValidationError, Exception) as e:
             log.warning("sentiment_parse_error", text=text[:50], error=str(e))
-            # Fallback: neutro con score 0.5
-            result = SentimentResult(
-                sentiment_label="neutro",
-                sentiment_score=0.5,
-            )
+            # Fallback basado en nivel_frustracion
+            result = _fallback_from_nivel(nivel)
         results.append(result)
 
     return results
+
+
+def _fallback_from_nivel(nivel: int) -> SentimentResult:
+    """Genera un SentimentResult de fallback basado en nivel_frustracion."""
+    mapping = {
+        0: SentimentResult(sentiment_label="neutro", sentiment_score=0.5),
+        1: SentimentResult(sentiment_label="frustrado", sentiment_score=0.55),
+        2: SentimentResult(sentiment_label="frustrado", sentiment_score=0.8),
+    }
+    return mapping.get(nivel, SentimentResult(sentiment_label="neutro", sentiment_score=0.5))
 
 
 # ── Detección de escalada ────────────────────────────────────────────────────
@@ -136,41 +146,32 @@ async def _classify_sentiment_batch(
 
 def detect_escalation(session_turns: pd.DataFrame) -> pd.Series:
     """
-    Detecta escalada en turnos de usuario dentro de una sesión.
+    Detecta escalada emocional en una sesión.
 
-    Condiciones (cualquiera activa el flag):
-    1. sentiment_score frustrado sube >0.3 en 2 turnos consecutivos del usuario
-    2. Texto en MAYÚSCULAS sostenidas (>70% del texto en caps)
-    3. Misma frase repetida >2 veces en la sesión
+    Condiciones:
+    1. sentiment_score sube >0.3 entre turnos consecutivos
+    2. nivel_frustracion sube de 1 a 2
     """
     escalation = pd.Series(False, index=session_turns.index)
-    user_turns = session_turns[session_turns["speaker"] == "user"]
 
-    if user_turns.empty:
+    if len(session_turns) < 2:
         return escalation
 
-    # Condición 1: Score de frustración sube >0.3 en 2 turnos consecutivos
-    user_scores = user_turns["sentiment_score"].fillna(0.0)
-    if len(user_scores) >= 2:
-        score_diffs = user_scores.diff()
+    scores = session_turns["sentiment_score"].fillna(0.0)
+    if len(scores) >= 2:
+        score_diffs = scores.diff()
         rapid_increase = score_diffs > 0.3
-        frustrado_mask = user_turns["sentiment_label"] == "frustrado"
-        escalation.loc[rapid_increase.index] = (
-            rapid_increase & frustrado_mask
-        )
+        frustrado_mask = session_turns["sentiment_label"] == "frustrado"
+        escalation = rapid_increase & frustrado_mask
 
-    # Condición 2: Misma frase repetida >2 veces
-    user_texts = user_turns["text_clean"].tolist()
-    from collections import Counter
+    # También escalada si nivel_frustracion pasa de 1 a 2
+    niveles = session_turns["nivel_frustracion"].fillna(0).astype(int)
+    if len(niveles) >= 2:
+        nivel_diffs = niveles.diff()
+        nivel_escalation = (nivel_diffs > 0) & (niveles >= 2)
+        escalation = escalation | nivel_escalation
 
-    text_counts = Counter(user_texts)
-    repeated_texts = {t for t, c in text_counts.items() if c > 2}
-    if repeated_texts:
-        for idx, row in user_turns.iterrows():
-            if row["text_clean"] in repeated_texts:
-                escalation.at[idx] = True
-
-    return escalation
+    return escalation.fillna(False)
 
 
 # ── Detección de abandono ────────────────────────────────────────────────────
@@ -180,27 +181,25 @@ def detect_abandonment(session_turns: pd.DataFrame) -> pd.Series:
     """
     Detecta riesgo de abandono.
 
-    Condición: último turno del usuario tiene frustrado con score > 0.7
-    Y no hay turnos del usuario después de los 2 turnos siguientes del bot.
+    Condición: último turno tiene frustración alta (score > 0.7)
+    o es_churn_risk=True.
     """
     abandonment = pd.Series(False, index=session_turns.index)
-    user_turns = session_turns[session_turns["speaker"] == "user"]
 
-    if user_turns.empty:
+    if session_turns.empty:
         return abandonment
 
-    last_user_idx = user_turns.index[-1]
-    last_user = session_turns.loc[last_user_idx]
+    last_idx = session_turns.index[-1]
+    last_turn = session_turns.loc[last_idx]
 
-    if (
-        last_user.get("sentiment_label") == "frustrado"
-        and (last_user.get("sentiment_score") or 0) > 0.7
-    ):
-        # Verificar que no hay más turnos del usuario después
-        remaining = session_turns.loc[last_user_idx + 1 :]  # noqa: E203
-        remaining_user = remaining[remaining["speaker"] == "user"]
-        if remaining_user.empty:
-            abandonment.at[last_user_idx] = True
+    is_frustrated = (
+        last_turn.get("sentiment_label") == "frustrado"
+        and (last_turn.get("sentiment_score") or 0) > 0.7
+    )
+    is_churn = bool(last_turn.get("es_churn_risk", False))
+
+    if is_frustrated or is_churn:
+        abandonment.at[last_idx] = True
 
     return abandonment
 
@@ -208,15 +207,19 @@ def detect_abandonment(session_turns: pd.DataFrame) -> pd.Series:
 # ── Pipeline principal ───────────────────────────────────────────────────────
 
 
-async def run_sentiment_analysis(processed_path: str) -> str:
+async def run_sentiment_analysis(
+    processed_path: str,
+    use_db: bool = False,
+) -> str:
     """
     Clasifica sentimiento en el corpus procesado.
 
     Args:
-        processed_path: Path al processed_corpus.jsonl
+        processed_path: Path al processed_corpus.jsonl.
+        use_db: Si True, persiste a Supabase.
 
     Returns:
-        Path al enriched_corpus.jsonl con campos de sentiment.
+        Path al enriched_corpus.jsonl.
     """
     path = Path(processed_path)
     if not path.exists():
@@ -224,7 +227,6 @@ async def run_sentiment_analysis(processed_path: str) -> str:
 
     log.info("sentiment_starting", processed_path=str(path))
 
-    # Cargar corpus procesado
     df = pd.read_json(path, lines=True)
 
     # Inicializar columnas de sentiment
@@ -233,39 +235,33 @@ async def run_sentiment_analysis(processed_path: str) -> str:
     df["escalation"] = False
     df["abandonment_risk"] = False
 
-    # Clasificar solo turnos de usuario
-    user_mask = df["speaker"] == "user"
-    user_texts = df.loc[user_mask, "text_clean"].tolist()
+    # Clasificar todos los turnos (todos son de usuario en este dataset)
+    texts = df["text_clean"].tolist()
+    niveles = df["nivel_frustracion"].fillna(0).astype(int).tolist()
 
-    if user_texts:
-        # Procesar en batches
+    if texts:
         all_results: list[SentimentResult] = []
-        for i in range(0, len(user_texts), BATCH_SIZE):
-            batch = user_texts[i : i + BATCH_SIZE]
-            batch_results = await _classify_sentiment_batch(batch)
+        for i in range(0, len(texts), BATCH_SIZE):
+            batch_texts = texts[i : i + BATCH_SIZE]
+            batch_niveles = niveles[i : i + BATCH_SIZE]
+            batch_results = await _classify_sentiment_batch(batch_texts, batch_niveles)
             all_results.extend(batch_results)
             log.info(
                 "sentiment_batch_done",
                 batch_num=i // BATCH_SIZE + 1,
                 processed=len(all_results),
-                total=len(user_texts),
+                total=len(texts),
             )
 
-        # Asignar resultados a turnos de usuario
-        user_indices = df.index[user_mask].tolist()
-        for idx, result in zip(user_indices, all_results):
+        for idx, result in enumerate(all_results):
             df.at[idx, "sentiment_label"] = result.sentiment_label
             df.at[idx, "sentiment_score"] = result.sentiment_score
 
     # Detectar escalada y abandono por sesión
-    for _session_id, session_df in df.groupby("session_id"):
+    for _, session_df in df.groupby("session_id"):
         session_idx = session_df.index
-
-        escalation_flags = detect_escalation(session_df)
-        df.loc[session_idx, "escalation"] = escalation_flags.values
-
-        abandonment_flags = detect_abandonment(session_df)
-        df.loc[session_idx, "abandonment_risk"] = abandonment_flags.values
+        df.loc[session_idx, "escalation"] = detect_escalation(session_df).values
+        df.loc[session_idx, "abandonment_risk"] = detect_abandonment(session_df).values
 
     # Guardar corpus enriquecido
     output_dir = Path("data/processed")
@@ -274,45 +270,78 @@ async def run_sentiment_analysis(processed_path: str) -> str:
 
     with open(enriched_path, "w", encoding="utf-8") as f:
         for _, row in df.iterrows():
-            record = row.to_dict()
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(json.dumps(row.to_dict(), ensure_ascii=False, default=str) + "\n")
 
     # Generar CSV de sesiones más frustradas
     _generate_frustrated_sessions_csv(df, output_dir)
+
+    if use_db:
+        await _persist_sentiment_to_db(df)
 
     log.info("sentiment_completado", enriched_path=str(enriched_path))
     return str(enriched_path)
 
 
+# ── Persistencia a Supabase ──────────────────────────────────────────────────
+
+
+async def _persist_sentiment_to_db(df: pd.DataFrame) -> None:
+    """Actualiza las columnas de sentiment en Supabase."""
+    from src.db.supabase_client import get_supabase
+
+    sb = get_supabase()
+    log.info("db_sentiment_updating", count=len(df))
+
+    for _, row in df.iterrows():
+        score = row.get("sentiment_score")
+        update_data = {
+            "sentiment_label": row.get("sentiment_label"),
+            "sentiment_score": (
+                float(score)
+                if score is not None and str(score) != "nan"
+                else None
+            ),
+            "escalation": bool(row.get("escalation", False)),
+            "abandonment_risk": bool(row.get("abandonment_risk", False)),
+        }
+        sb.table("messages").update(update_data).eq(
+            "session_id", row["session_id"]
+        ).eq("turn_id", int(row["turn_id"])).execute()
+
+    # Actualizar métricas agregadas en sessions
+    for session_id, session_df in df.groupby("session_id"):
+        frustrated = session_df[session_df["sentiment_label"] == "frustrado"]
+        session_update: dict[str, Any] = {
+            "has_escalation": bool(session_df["escalation"].any()),
+            "has_abandonment": bool(session_df["abandonment_risk"].any()),
+        }
+        if not frustrated.empty:
+            scores = frustrated["sentiment_score"].dropna()
+            if len(scores) > 0:
+                session_update["avg_frustration_score"] = round(float(scores.mean()), 3)
+                session_update["max_frustration_score"] = round(float(scores.max()), 3)
+        sb.table("sessions").update(session_update).eq("id", session_id).execute()
+
+    log.info("db_sentiment_updated")
+
+
+# ── Top sesiones frustradas ──────────────────────────────────────────────────
+
+
 def _generate_frustrated_sessions_csv(
-    df: pd.DataFrame, output_dir: Path
+    df: pd.DataFrame, output_dir: Path,
 ) -> None:
-    """
-    Genera top_frustrated_sessions.csv con las 50 sesiones más frustradas.
-
-    Columnas: session_id, avg_frustration_score, max_frustration_score,
-              escalation_count, lang
-    """
-    user_df = df[df["speaker"] == "user"].copy()
-
-    empty_columns = [
-        "session_id",
-        "avg_frustration_score",
-        "max_frustration_score",
-        "escalation_count",
-        "lang",
+    """Genera top_frustrated_sessions.csv con las 50 sesiones más frustradas."""
+    columns = [
+        "session_id", "avg_frustration_score", "max_frustration_score",
+        "escalation_count", "region",
     ]
 
-    if user_df.empty:
-        result = pd.DataFrame(columns=empty_columns)
-        result.to_csv(output_dir / "top_frustrated_sessions.csv", index=False)
-        return
-
-    frustrated = user_df[user_df["sentiment_label"] == "frustrado"]
+    frustrated = df[df["sentiment_label"] == "frustrado"]
     if frustrated.empty:
-        # Crear CSV vacío con headers
-        result = pd.DataFrame(columns=empty_columns)
-        result.to_csv(output_dir / "top_frustrated_sessions.csv", index=False)
+        pd.DataFrame(columns=columns).to_csv(
+            output_dir / "top_frustrated_sessions.csv", index=False,
+        )
         return
 
     session_stats = (
@@ -325,13 +354,10 @@ def _generate_frustrated_sessions_csv(
         .reset_index()
     )
 
-    # Agregar idioma de sesión (primera ocurrencia)
-    session_lang = df.groupby("session_id")["lang"].first()
-    session_stats = session_stats.merge(
-        session_lang, on="session_id", how="left"
-    )
+    # Agregar región de la sesión
+    session_region = df.groupby("session_id")["region"].first()
+    session_stats = session_stats.merge(session_region, on="session_id", how="left")
 
-    # Ordenar y limitar a top 50
     session_stats = (
         session_stats.sort_values("avg_frustration_score", ascending=False)
         .head(50)

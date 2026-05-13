@@ -1,18 +1,34 @@
+"use client";
+
 import Link from "next/link";
 import { useTheme } from "../context/theme-context";
+import { FlowFrustration } from "../lib/api";
 
 type Row = { name: string; value: number; color: string; opacity?: number; href?: string };
 
-export function FrustrationFlows() {
+export function FrustrationFlows({ data }: { data?: FlowFrustration[] }) {
   const { colors } = useTheme();
 
-  const rows: Row[] = [
-    { name: "Devoluciones", value: 82, color: colors.error, href: "/flujos/devoluciones" },
-    { name: "Cambio de plan", value: 71, color: colors.error, opacity: 0.75 },
-    { name: "Soporte técnico", value: 58, color: colors.warning },
-    { name: "Facturación", value: 44, color: colors.warning, opacity: 0.75 },
-    { name: "Onboarding", value: 29, color: colors.textMuted },
+  const fallbackRows: Row[] = [
+    { name: "Sin datos", value: 0, color: colors.textMuted }
   ];
+
+  const rows: Row[] = data && data.length > 0 
+    ? data.map(d => {
+        let color = colors.textMuted;
+        let opacity = 1;
+        if (d.frustrationScore >= 75) color = colors.error;
+        else if (d.frustrationScore >= 50) color = colors.warning;
+        else if (d.frustrationScore >= 25) { color = colors.warning; opacity = 0.75; }
+        
+        return {
+          name: d.intent.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase()),
+          value: d.frustrationScore,
+          color,
+          opacity
+        };
+      })
+    : fallbackRows;
 
   return (
     <div
@@ -53,6 +69,7 @@ export function FrustrationFlows() {
                 <div
                   style={{
                     width: `${r.value}%`,
+                    minWidth: "4px",
                     height: "100%",
                     backgroundColor: r.color,
                     opacity: r.opacity ?? 1,
@@ -71,6 +88,7 @@ export function FrustrationFlows() {
                 <div
                   style={{
                     width: `${r.value}%`,
+                    minWidth: "4px",
                     height: "100%",
                     backgroundColor: r.color,
                     opacity: r.opacity ?? 1,

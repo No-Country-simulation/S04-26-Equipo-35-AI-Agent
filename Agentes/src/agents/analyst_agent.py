@@ -5,7 +5,11 @@ Lee el corpus enriquecido con sentiment e intent. Calcula métricas
 agregadas, detecta patrones y genera el reporte Markdown y el JSON
 de métricas para el dashboard.
 
-Leer skills/skill_analyst.md antes de modificar este archivo.
+Usa `region` (LATAM/BRAZIL/EUROPE) para comparaciones regionales.
+
+Cuando use_db=True:
+  - Usa Qdrant para búsqueda semántica de conversaciones similares.
+  - Guarda snapshots de métricas en Supabase para historial.
 """
 import json
 from datetime import datetime, timezone
@@ -17,29 +21,15 @@ import structlog
 
 log = structlog.get_logger()
 
-# ── Archivos requeridos ──────────────────────────────────────────────────────
-
-REQUIRED_FILES = [
-    "data/processed/enriched_corpus.jsonl",
-    "data/processed/top_frustrated_sessions.csv",
-    "data/processed/unresolved_intents_ranking.json",
-]
-
 
 # ── Métricas globales ────────────────────────────────────────────────────────
 
 
 def calc_global_metrics(df: pd.DataFrame) -> dict[str, Any]:
-    """
-    Calcula métricas globales del corpus enriquecido.
-
-    Returns:
-        Dict con: total_sessions, escalation_rate, abandonment_rate,
-        resolution_rate, sentiment_distribution, lang_distribution.
-    """
+    """Calcula métricas globales del corpus enriquecido."""
     total_sessions = int(df["session_id"].nunique())
 
-    # Tasa de escalada (sesiones con al menos un escalation=True)
+    # Tasa de escalada
     sessions_with_escalation = df[df["escalation"] == True].groupby("session_id").ngroups  # noqa: E712
     escalation_rate = round(sessions_with_escalation / total_sessions, 3) if total_sessions > 0 else 0.0
 
@@ -47,78 +37,68 @@ def calc_global_metrics(df: pd.DataFrame) -> dict[str, Any]:
     sessions_with_abandonment = df[df["abandonment_risk"] == True].groupby("session_id").ngroups  # noqa: E712
     abandonment_rate = round(sessions_with_abandonment / total_sessions, 3) if total_sessions > 0 else 0.0
 
-    # Tasa de resolución (turnos de usuario)
-    user_with_resolved = df[(df["speaker"] == "user") & (df["resolved"].notna())]
-    if len(user_with_resolved) > 0:
-        resolution_rate = round(
-            len(user_with_resolved[user_with_resolved["resolved"] == True]) / len(user_with_resolved),  # noqa: E712
-            3,
-        )
-    else:
-        resolution_rate = 0.0
+    # Tasa de resolución
+    with_resolved = df[df["resolved"].notna()]
+    resolution_rate = (
+        round(float(with_resolved[with_resolved["resolved"] == True].shape[0] / len(with_resolved)), 3)  # noqa: E712
+        if len(with_resolved) > 0 else 0.0
+    )
 
     # Distribución de sentimiento
-    user_df = df[df["speaker"] == "user"]
-    sentiment_counts = user_df["sentiment_label"].value_counts()
+    sentiment_counts = df["sentiment_label"].value_counts()
     sentiment_total = sentiment_counts.sum()
     sentiment_distribution = {
-        "frustrado": round(sentiment_counts.get("frustrado", 0) / sentiment_total * 100, 1) if sentiment_total > 0 else 0,
-        "neutro": round(sentiment_counts.get("neutro", 0) / sentiment_total * 100, 1) if sentiment_total > 0 else 0,
-        "satisfecho": round(sentiment_counts.get("satisfecho", 0) / sentiment_total * 100, 1) if sentiment_total > 0 else 0,
+        label: round(sentiment_counts.get(label, 0) / sentiment_total * 100, 1) if sentiment_total > 0 else 0
+        for label in ["frustrado", "neutro", "satisfecho"]
     }
 
-    # Distribución por idioma
-    lang_counts = df["lang"].value_counts()
-    lang_total = lang_counts.sum()
-    lang_distribution = {
-        "es": round(lang_counts.get("es", 0) / lang_total * 100, 1) if lang_total > 0 else 0,
-        "pt": round(lang_counts.get("pt", 0) / lang_total * 100, 1) if lang_total > 0 else 0,
+    # Distribución por región
+    region_counts = df["region"].value_counts()
+    region_total = region_counts.sum()
+    region_distribution = {
+        region: round(region_counts.get(region, 0) / region_total * 100, 1) if region_total > 0 else 0
+        for region in ["LATAM", "BRAZIL", "EUROPE"]
     }
+
+    # Tasa de churn
+    churn_sessions = df[df["es_churn_risk"] == True]["session_id"].nunique()  # noqa: E712
+    churn_rate = round(churn_sessions / total_sessions, 3) if total_sessions > 0 else 0.0
 
     return {
         "total_sessions": total_sessions,
+        "total_messages": len(df),
         "escalation_rate": escalation_rate,
         "abandonment_rate": abandonment_rate,
         "resolution_rate": resolution_rate,
+        "churn_rate": churn_rate,
         "sentiment_distribution": sentiment_distribution,
-        "lang_distribution": lang_distribution,
+        "region_distribution": region_distribution,
     }
 
 
 # ── Top flujos frustrados ────────────────────────────────────────────────────
 
 
-def calc_top_frustrated_flows(
-    df: pd.DataFrame, top_n: int = 5
-) -> list[dict[str, Any]]:
-    """
-    Identifica los top N flujos con mayor frustración.
-
-    Agrupa por intent_label, calcula avg_sentiment_score para frustrado.
-    Identifica turn_id donde comienza la escalada.
-    """
-    user_frustrated = df[
-        (df["speaker"] == "user") & (df["sentiment_label"] == "frustrado")
-    ]
-
-    if user_frustrated.empty:
+def calc_top_frustrated_flows(df: pd.DataFrame, top_n: int = 5) -> list[dict[str, Any]]:
+    """Identifica los top N flujos con mayor frustración."""
+    frustrated = df[df["sentiment_label"] == "frustrado"]
+    if frustrated.empty:
         return []
 
     flows = []
-    for intent, group in user_frustrated.groupby("intent_label"):
+    for intent, group in frustrated.groupby("intent_label"):
+        if intent is None:
+            continue
         avg_score = round(float(group["sentiment_score"].mean()), 2)
-
-        # Encontrar turno promedio de escalada
         escalated = group[group["escalation"] == True]  # noqa: E712
-        avg_escalation_turn = (
-            round(float(escalated["turn_id"].mean()), 1) if not escalated.empty else None
-        )
 
         flows.append({
             "intent_label": str(intent),
             "avg_frustration_score": avg_score,
             "frustration_count": int(len(group)),
-            "escalation_turn": avg_escalation_turn,
+            "escalation_turn": (
+                round(float(escalated["turn_id"].mean()), 1) if not escalated.empty else None
+            ),
         })
 
     flows.sort(key=lambda x: x["avg_frustration_score"], reverse=True)
@@ -128,19 +108,9 @@ def calc_top_frustrated_flows(
 # ── Correlación intent-frustración ───────────────────────────────────────────
 
 
-def calc_intent_frustration_correlation(
-    df: pd.DataFrame,
-) -> list[dict[str, Any]]:
-    """
-    Para cada intent: calcula correlación entre resolved=False y
-    sentiment frustrado.
-
-    Retorna lista ordenada por (unresolved_pct * avg_frustration) DESC.
-    """
-    user_df = df[
-        (df["speaker"] == "user") & (df["intent_label"].notna())
-    ]
-
+def calc_intent_frustration_correlation(df: pd.DataFrame) -> list[dict[str, Any]]:
+    """Calcula correlación entre intención no resuelta y frustración."""
+    user_df = df[df["intent_label"].notna()]
     if user_df.empty:
         return []
 
@@ -150,16 +120,12 @@ def calc_intent_frustration_correlation(
         unresolved = group[group["resolved"] == False]  # noqa: E712
         unresolved_pct = round(len(unresolved) / total * 100, 1) if total > 0 else 0
 
-        frustrated_unresolved = unresolved[
-            unresolved["sentiment_label"] == "frustrado"
-        ]
+        frustrated_unresolved = unresolved[unresolved["sentiment_label"] == "frustrado"]
         avg_frustration = (
             round(float(frustrated_unresolved["sentiment_score"].mean()), 2)
-            if not frustrated_unresolved.empty
-            else 0.0
+            if not frustrated_unresolved.empty else 0.0
         )
 
-        # Score combinado para ranking
         combined_score = (unresolved_pct / 100) * avg_frustration
 
         correlations.append({
@@ -178,113 +144,77 @@ def calc_intent_frustration_correlation(
 
 
 def calc_abandonment_patterns(df: pd.DataFrame) -> dict[str, Any]:
-    """
-    Analiza patrones de abandono.
-
-    Returns:
-        avg_turn_of_abandonment, top_intents_at_abandonment,
-        es_vs_pt_abandonment rates.
-    """
+    """Analiza patrones de abandono por región."""
     abandoned = df[df["abandonment_risk"] == True]  # noqa: E712
 
     if abandoned.empty:
         return {
             "avg_turn_of_abandonment": 0.0,
             "top_intents_at_abandonment": [],
-            "es_vs_pt_abandonment": {"es": 0.0, "pt": 0.0},
+            "region_abandonment": {"LATAM": 0.0, "BRAZIL": 0.0, "EUROPE": 0.0},
         }
 
     avg_turn = round(float(abandoned["turn_id"].mean()), 1)
 
-    # Top intents en momento de abandono
     intent_counts = abandoned["intent_label"].value_counts().head(5)
     top_intents = [
         {"intent": str(intent), "count": int(count)}
         for intent, count in intent_counts.items()
     ]
 
-    # Tasa de abandono por idioma
-    total_by_lang = df.groupby("lang")["session_id"].nunique()
-    abandoned_by_lang = abandoned.groupby("lang")["session_id"].nunique()
+    # Tasa de abandono por región
+    total_by_region = df.groupby("region")["session_id"].nunique()
+    abandoned_by_region = abandoned.groupby("region")["session_id"].nunique()
 
-    es_vs_pt = {}
-    for lang in ["es", "pt"]:
-        total = total_by_lang.get(lang, 0)
-        aband = abandoned_by_lang.get(lang, 0)
-        es_vs_pt[lang] = round(aband / total, 3) if total > 0 else 0.0
+    region_abandonment = {}
+    for region in ["LATAM", "BRAZIL", "EUROPE"]:
+        total = total_by_region.get(region, 0)
+        aband = abandoned_by_region.get(region, 0)
+        region_abandonment[region] = round(aband / total, 3) if total > 0 else 0.0
 
     return {
         "avg_turn_of_abandonment": avg_turn,
         "top_intents_at_abandonment": top_intents,
-        "es_vs_pt_abandonment": es_vs_pt,
+        "region_abandonment": region_abandonment,
     }
 
 
-# ── Comparación por idioma ───────────────────────────────────────────────────
+# ── Comparación por región ───────────────────────────────────────────────────
 
 
-def calc_lang_comparison(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
-    """
-    Compara métricas clave entre ES y PT.
-
-    Returns:
-        Dict con métricas por idioma: {es: {...}, pt: {...}}.
-    """
+def calc_region_comparison(df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    """Compara métricas clave entre LATAM, BRAZIL y EUROPE."""
     result: dict[str, dict[str, Any]] = {}
 
-    for lang in ["es", "pt"]:
-        lang_df = df[df["lang"] == lang]
-        user_lang = lang_df[lang_df["speaker"] == "user"]
-
-        if user_lang.empty:
-            result[lang] = {
-                "sessions": 0,
-                "avg_frustration": 0.0,
-                "resolution_rate": 0.0,
-                "escalation_rate": 0.0,
-                "abandonment_rate": 0.0,
-                "top_unresolved_intents": [],
+    for region in ["LATAM", "BRAZIL", "EUROPE"]:
+        region_df = df[df["region"] == region]
+        if region_df.empty:
+            result[region] = {
+                "sessions": 0, "avg_frustration": 0.0, "resolution_rate": 0.0,
+                "escalation_rate": 0.0, "abandonment_rate": 0.0, "churn_rate": 0.0,
             }
             continue
 
-        total_sessions = lang_df["session_id"].nunique()
-        frustrated = user_lang[user_lang["sentiment_label"] == "frustrado"]
+        total_sessions = region_df["session_id"].nunique()
+        frustrated = region_df[region_df["sentiment_label"] == "frustrado"]
 
-        with_resolved = user_lang[user_lang["resolved"].notna()]
-        res_rate = (
-            round(float(with_resolved["resolved"].mean()), 3)
-            if len(with_resolved) > 0
-            else 0.0
-        )
+        with_resolved = region_df[region_df["resolved"].notna()]
+        res_rate = round(float(with_resolved["resolved"].mean()), 3) if len(with_resolved) > 0 else 0.0
 
-        sessions_escalated = lang_df[lang_df["escalation"] == True]["session_id"].nunique()  # noqa: E712
-        sessions_abandoned = lang_df[lang_df["abandonment_risk"] == True]["session_id"].nunique()  # noqa: E712
+        sessions_escalated = region_df[region_df["escalation"] == True]["session_id"].nunique()  # noqa: E712
+        sessions_abandoned = region_df[region_df["abandonment_risk"] == True]["session_id"].nunique()  # noqa: E712
+        sessions_churn = region_df[region_df["es_churn_risk"] == True]["session_id"].nunique()  # noqa: E712
 
-        # Top intenciones no resueltas por idioma
-        unresolved = user_lang[user_lang["resolved"] == False]  # noqa: E712
-        top_unresolved = (
-            unresolved["intent_label"]
-            .value_counts()
-            .head(5)
-            .to_dict()
-        ) if not unresolved.empty else {}
-
-        result[lang] = {
+        result[region] = {
             "sessions": int(total_sessions),
-            "avg_frustration": round(
-                float(frustrated["sentiment_score"].mean()), 2
-            ) if not frustrated.empty else 0.0,
+            "avg_frustration": (
+                round(float(frustrated["sentiment_score"].mean()), 2)
+                if not frustrated.empty else 0.0
+            ),
             "resolution_rate": res_rate,
-            "escalation_rate": round(
-                sessions_escalated / total_sessions, 3
-            ) if total_sessions > 0 else 0.0,
-            "abandonment_rate": round(
-                sessions_abandoned / total_sessions, 3
-            ) if total_sessions > 0 else 0.0,
-            "top_unresolved_intents": [
-                {"intent": k, "count": int(v)}
-                for k, v in top_unresolved.items()
-            ],
+            "escalation_rate": round(sessions_escalated / total_sessions, 3) if total_sessions > 0 else 0.0,
+            "abandonment_rate": round(sessions_abandoned / total_sessions, 3) if total_sessions > 0 else 0.0,
+            "churn_rate": round(sessions_churn / total_sessions, 3) if total_sessions > 0 else 0.0,
         }
 
     return result
@@ -297,13 +227,9 @@ def prioritize_recommendations(
     intent_metrics: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
     """
-    Prioriza recomendaciones según reglas del skill.
-
     P1: unresolved_pct > 40 AND avg_frustration > 0.7
     P2: unresolved_pct entre 20-40 OR avg_frustration > 0.5
-    P3: todo lo demás
-
-    Máximo: 3 items en P1, 5 en P2, sin límite en P3.
+    P3: todo lo demás. Max: 3 P1, 5 P2.
     """
     p1: list[dict[str, Any]] = []
     p2: list[dict[str, Any]] = []
@@ -320,26 +246,18 @@ def prioritize_recommendations(
         else:
             p3.append(metric)
 
-    return {
-        "P1": p1[:3],
-        "P2": p2[:5],
-        "P3": p3,
-    }
+    return {"P1": p1[:3], "P2": p2[:5], "P3": p3}
 
 
 # ── Generación del reporte ───────────────────────────────────────────────────
 
 
 def _generate_report(
-    global_metrics: dict,
-    top_flows: list[dict],
-    correlations: list[dict],
-    abandonment: dict,
-    priorities: dict,
-    lang_comparison: dict[str, dict[str, Any]],
-    period: str,
+    global_metrics: dict, top_flows: list[dict], correlations: list[dict],
+    abandonment: dict, priorities: dict,
+    region_comparison: dict[str, dict[str, Any]], period: str,
 ) -> str:
-    """Genera el reporte Markdown siguiendo la estructura del skill."""
+    """Genera el reporte Markdown."""
     now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     lines = [
@@ -351,34 +269,43 @@ def _generate_report(
         "| Métrica | Valor |",
         "|---------|-------|",
         f"| Total sesiones | {global_metrics['total_sessions']} |",
+        f"| Total mensajes | {global_metrics['total_messages']} |",
         f"| Tasa de escalada | {global_metrics['escalation_rate'] * 100:.1f}% |",
         f"| Tasa de abandono | {global_metrics['abandonment_rate'] * 100:.1f}% |",
+        f"| Tasa de churn | {global_metrics['churn_rate'] * 100:.1f}% |",
         f"| Resolution rate | {global_metrics['resolution_rate'] * 100:.1f}% |",
         f"| Frustrado | {global_metrics['sentiment_distribution']['frustrado']}% |",
         f"| Neutro | {global_metrics['sentiment_distribution']['neutro']}% |",
         f"| Satisfecho | {global_metrics['sentiment_distribution']['satisfecho']}% |",
-        f"| Español (ES) | {global_metrics['lang_distribution']['es']}% |",
-        f"| Portugués (PT) | {global_metrics['lang_distribution']['pt']}% |",
         "",
     ]
 
-    # Top flujos frustrados
+    # Distribución regional
+    lines.extend([
+        "## Distribución Regional",
+        "| Región | % |",
+        "|--------|---|",
+    ])
+    for region, pct in global_metrics["region_distribution"].items():
+        lines.append(f"| {region} | {pct}% |")
+    lines.append("")
+
+    # Top flujos
     lines.append("## Top 5 Flujos con Mayor Frustración")
     for i, flow in enumerate(top_flows, 1):
         lines.extend([
             f"### {i}. {flow['intent_label']}",
-            f"- **Intención:** {flow['intent_label']}",
-            f"- **Frustración promedio:** {flow['avg_frustration_score']}",
-            f"- **Casos de frustración:** {flow['frustration_count']}",
-            f"- **Momento de escalada:** Turno {flow.get('escalation_turn', 'N/A')}",
+            f"- Frustración promedio: {flow['avg_frustration_score']}",
+            f"- Casos: {flow['frustration_count']}",
+            f"- Escalada en turno: {flow.get('escalation_turn', 'N/A')}",
             "",
         ])
 
     # Top intenciones no resueltas
     lines.extend([
         "## Top 10 Intenciones No Resueltas",
-        "| Rank | Intención | Total | % No Resuelto | Frustración Asociada |",
-        "|------|-----------|-------|---------------|----------------------|",
+        "| Rank | Intención | Total | % No Resuelto | Frustración |",
+        "|------|-----------|-------|---------------|-------------|",
     ])
     for i, corr in enumerate(correlations[:10], 1):
         lines.append(
@@ -387,76 +314,42 @@ def _generate_report(
         )
     lines.append("")
 
-    # Patrones de abandono
+    # Abandono
     lines.extend([
         "## Patrones de Abandono",
-        f"- **Turno promedio de abandono:** {abandonment['avg_turn_of_abandonment']}",
-        f"- **Abandono ES:** {abandonment['es_vs_pt_abandonment'].get('es', 0) * 100:.1f}%",
-        f"- **Abandono PT:** {abandonment['es_vs_pt_abandonment'].get('pt', 0) * 100:.1f}%",
+        f"- Turno promedio de abandono: {abandonment['avg_turn_of_abandonment']}",
+    ])
+    for region, rate in abandonment["region_abandonment"].items():
+        lines.append(f"- Abandono {region}: {rate * 100:.1f}%")
+    lines.append("")
+
+    # Comparación regional
+    lines.extend([
+        "## Comparación Regional",
+        "| Métrica | LATAM | BRAZIL | EUROPE |",
+        "|---------|:-----:|:------:|:------:|",
+    ])
+    latam = region_comparison.get("LATAM", {})
+    brazil = region_comparison.get("BRAZIL", {})
+    europe = region_comparison.get("EUROPE", {})
+
+    lines.extend([
+        f"| Sesiones | {latam.get('sessions', 0)} | {brazil.get('sessions', 0)} | {europe.get('sessions', 0)} |",
+        f"| Frustración | {latam.get('avg_frustration', 0)} | {brazil.get('avg_frustration', 0)} | {europe.get('avg_frustration', 0)} |",
+        f"| Resolution | {latam.get('resolution_rate', 0) * 100:.1f}% | {brazil.get('resolution_rate', 0) * 100:.1f}% | {europe.get('resolution_rate', 0) * 100:.1f}% |",
+        f"| Churn | {latam.get('churn_rate', 0) * 100:.1f}% | {brazil.get('churn_rate', 0) * 100:.1f}% | {europe.get('churn_rate', 0) * 100:.1f}% |",
         "",
     ])
-
-    if abandonment["top_intents_at_abandonment"]:
-        lines.append("### Intenciones en Momento de Abandono")
-        for item in abandonment["top_intents_at_abandonment"]:
-            lines.append(f"- {item['intent']}: {item['count']} casos")
-        lines.append("")
-
-    # Diferencias ES vs PT
-    lines.extend([
-        "## Diferencias ES vs PT",
-        "| Métrica | Español (ES) | Portugués (PT) |",
-        "|---------|:------------:|:--------------:|",
-    ])
-    es = lang_comparison.get("es", {})
-    pt = lang_comparison.get("pt", {})
-    lines.extend([
-        f"| Sesiones | {es.get('sessions', 0)} | {pt.get('sessions', 0)} |",
-        f"| Frustración promedio | {es.get('avg_frustration', 0)} | {pt.get('avg_frustration', 0)} |",
-        f"| Resolution rate | {es.get('resolution_rate', 0) * 100:.1f}% | {pt.get('resolution_rate', 0) * 100:.1f}% |",
-        f"| Tasa de escalada | {es.get('escalation_rate', 0) * 100:.1f}% | {pt.get('escalation_rate', 0) * 100:.1f}% |",
-        f"| Tasa de abandono | {es.get('abandonment_rate', 0) * 100:.1f}% | {pt.get('abandonment_rate', 0) * 100:.1f}% |",
-        "",
-    ])
-
-    # Top intenciones no resueltas por idioma
-    for lang, label in [("es", "Español"), ("pt", "Portugués")]:
-        lang_data = lang_comparison.get(lang, {})
-        top_intents = lang_data.get("top_unresolved_intents", [])
-        if top_intents:
-            lines.append(f"### Top Intenciones No Resueltas — {label}")
-            for item in top_intents:
-                lines.append(f"- {item['intent']}: {item['count']} casos")
-            lines.append("")
 
     # Recomendaciones
     lines.append("## Recomendaciones para el Sprint")
-
-    if priorities["P1"]:
-        lines.append("### P1 — Impacto Alto (resolver esta semana)")
-        for i, p in enumerate(priorities["P1"], 1):
-            lines.extend([
-                f"{i}. **{p['intent_label']}** — {p['unresolved_pct']}% sin resolver, frustración {p['avg_frustration']}",
-                f"   - Acción: Revisar flujo conversacional de {p['intent_label']}, rediseñar respuestas del bot para confirmar resolución explícitamente",
-                f"   - Métrica de éxito: Reducir unresolved_pct a <20% y frustración a <0.5",
-                "",
-            ])
-
-    if priorities["P2"]:
-        lines.append("### P2 — Impacto Medio (próximo sprint)")
-        for i, p in enumerate(priorities["P2"], 1):
-            lines.extend([
-                f"{i}. **{p['intent_label']}** — {p['unresolved_pct']}% sin resolver, frustración {p['avg_frustration']}",
-                f"   - Acción: Analizar los 3 turnos previos a la frustración en flujos de {p['intent_label']} e identificar respuestas del bot que no abordan la intención",
-                f"   - Métrica de éxito: Reducir unresolved_pct en 50% relativo (de {p['unresolved_pct']}% a {p['unresolved_pct'] / 2:.1f}%)",
-                "",
-            ])
-
-    if priorities["P3"]:
-        lines.append("### P3 — Backlog")
-        for p in priorities["P3"]:
-            lines.append(f"- {p['intent_label']}: {p['unresolved_pct']}% sin resolver")
-        lines.append("")
+    for priority_key, label in [("P1", "P1 — Impacto Alto"), ("P2", "P2 — Impacto Medio"), ("P3", "P3 — Backlog")]:
+        items = priorities[priority_key]
+        if items:
+            lines.append(f"### {label}")
+            for i, p in enumerate(items, 1):
+                lines.append(f"{i}. **{p['intent_label']}** — {p['unresolved_pct']}% sin resolver, frustración {p['avg_frustration']}")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -464,56 +357,30 @@ def _generate_report(
 # ── Recomendaciones con LLM (opcional) ───────────────────────────────────────
 
 _SMART_RECS_PROMPT = """
-Eres el Head of Product Analytics de ConversaAI, una plataforma de soporte conversacional
-que procesa más de 2 millones de mensajes mensuales en español LATAM y portugués brasileño.
-
-Vas a presentar estas recomendaciones al VP de Producto en la reunión de sprint.
-Tu análisis debe ser tan bueno que parezca hecho por un analista humano senior con
-10 años de experiencia en CX — no una lista genérica de mejoras.
+Eres el Head of Product Analytics de ConversaAI, una plataforma de soporte
+que procesa 2M+ mensajes/mes en español LATAM y portugués brasileño.
 
 ## Datos del Último Mes
-- Total sesiones analizadas: {total_sessions}
-- Tasa de escalada emocional: {escalation_rate:.1%}
-- Tasa de abandono: {abandonment_rate:.1%}
+- Total sesiones: {total_sessions}
+- Escalada: {escalation_rate:.1%}
+- Abandono: {abandonment_rate:.1%}
 - Resolution rate: {resolution_rate:.1%}
+- Churn rate: {churn_rate:.1%}
 
-## Top 5 Flujos con Mayor Frustración
+## Top Flujos Frustrados
 {top_flows_text}
 
 ## Top Intenciones No Resueltas
 {unresolved_text}
 
-## Tu Análisis Debe Incluir
-Para CADA recomendación, piensa como un detective de CX:
-1. **Causa raíz**: ¿POR QUÉ este flujo falla? (no solo QUÉ falla)
-2. **Acción concreta**: Qué debe cambiar EN EL BOT esta semana/sprint
-3. **Métrica de éxito**: Cómo medimos mejora con ESTE MISMO pipeline el mes siguiente
-4. **Impacto estimado**: Cuántos usuarios se benefician (basado en volumen de datos)
-
-## Formato de Respuesta
-Genera EXACTAMENTE este JSON (sin texto adicional, sin markdown):
+Genera EXACTAMENTE este JSON (sin texto adicional):
 {{
-  "P1": [
-    {{
-      "intent": "nombre_intent",
-      "action": "Acción específica y ejecutable en 1-2 semanas. Ejemplo: 'En el flujo de reporte_problema, cuando el usuario dice que ya reinició la app, ofrecer escalación automática a L2 con ticket en lugar de repetir troubleshooting básico'",
-      "metric": "Métrica medible. Ejemplo: 'Reducir unresolved_pct de 47% a <25% y frustración promedio de 0.74 a <0.5 en el próximo mes'",
-      "impact": "Impacto cuantificado. Ejemplo: 'Afecta a ~2,100 sesiones/mes, potencial reducción de 15% en tasa de abandono general'"
-    }}
-  ],
+  "P1": [{{"intent": "nombre", "action": "acción concreta", "metric": "métrica medible", "impact": "impacto cuantificado"}}],
   "P2": [...],
   "P3": [...]
 }}
 
-## Reglas Inquebrantables
-- P1: máximo 3 items — los quick wins que más mueven la aguja esta semana
-- P2: máximo 5 items — mejoras para el próximo sprint
-- P3: el resto para backlog
-- NUNCA decir "mejorar el bot en general" o "optimizar la experiencia"
-- Cada acción debe ser tan concreta que un PM la pueda convertir en ticket de Jira
-- Cada métrica debe ser verificable re-ejecutando este pipeline el mes siguiente
-- Piensa en 'customer journeys rotos': conecta la intención no resuelta con la
-  frustración y el abandono como una secuencia narrativa, no como datos aislados
+Reglas: P1 máximo 3 quick wins, P2 máximo 5, cada acción debe ser un ticket de Jira.
 """
 
 
@@ -522,28 +389,19 @@ async def generate_smart_recommendations(
     top_flows: list[dict[str, Any]],
     correlations: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]] | None:
-    """
-    Genera recomendaciones usando el LLM para análisis más profundo.
-
-    Returns:
-        Dict con P1/P2/P3 recommendations, o None si falla.
-    """
+    """Genera recomendaciones usando el LLM."""
     try:
         from src.llm_factory import get_llm
     except ImportError:
-        log.warning("llm_factory_not_available")
         return None
 
-    # Formatear datos para el prompt
     top_flows_text = "\n".join(
-        f"- {f['intent_label']}: frustración {f['avg_frustration_score']}, "
-        f"{f['frustration_count']} casos, escalada en turno {f.get('escalation_turn', 'N/A')}"
+        f"- {f['intent_label']}: frustración {f['avg_frustration_score']}, {f['frustration_count']} casos"
         for f in top_flows[:5]
     ) or "Sin datos"
 
     unresolved_text = "\n".join(
-        f"- {c['intent_label']}: {c['unresolved_pct']}% no resuelto, "
-        f"frustración {c['avg_frustration']}, {c['total']} ocurrencias"
+        f"- {c['intent_label']}: {c['unresolved_pct']}% no resuelto, frustración {c['avg_frustration']}"
         for c in correlations[:10]
     ) or "Sin datos"
 
@@ -552,6 +410,7 @@ async def generate_smart_recommendations(
         escalation_rate=global_metrics["escalation_rate"],
         abandonment_rate=global_metrics["abandonment_rate"],
         resolution_rate=global_metrics["resolution_rate"],
+        churn_rate=global_metrics.get("churn_rate", 0),
         top_flows_text=top_flows_text,
         unresolved_text=unresolved_text,
     )
@@ -560,7 +419,6 @@ async def generate_smart_recommendations(
         llm = get_llm(role="smart")
         response = llm.invoke(prompt)
         content = response.content if hasattr(response, "content") else str(response)
-
         parsed = json.loads(content)
         log.info("smart_recommendations_generated", p1=len(parsed.get("P1", [])))
         return parsed
@@ -575,53 +433,45 @@ async def generate_smart_recommendations(
 async def run_analyst(
     enriched_path: str,
     smart_recommendations: bool = False,
+    use_db: bool = False,
 ) -> dict[str, str]:
     """
     Genera el reporte de insights y el JSON de métricas.
 
     Args:
-        enriched_path: Path al enriched_corpus.jsonl
-        smart_recommendations: Si True, usa LLM para generar recomendaciones.
-
-    Returns:
-        Dict con paths: {"report": "reports/insights_report.md",
-                         "metrics": "data/processed/metrics_summary.json"}
+        enriched_path: Path al enriched_corpus.jsonl.
+        smart_recommendations: Si True, usa LLM.
+        use_db: Si True, usa Qdrant y guarda snapshots en Supabase.
     """
     path = Path(enriched_path)
     if not path.exists():
-        raise FileNotFoundError(f"Corpus enriquecido no encontrado: {path}")
+        raise FileNotFoundError(f"Corpus no encontrado: {path}")
 
     log.info("analyst_starting", enriched_path=str(path))
 
-    # Cargar datos
     df = pd.read_json(path, lines=True)
 
-    # Calcular todas las métricas
+    # Calcular métricas
     global_metrics = calc_global_metrics(df)
     top_flows = calc_top_frustrated_flows(df)
     correlations = calc_intent_frustration_correlation(df)
     abandonment = calc_abandonment_patterns(df)
-    lang_comparison = calc_lang_comparison(df)
+    region_comparison = calc_region_comparison(df)
     priorities = prioritize_recommendations(correlations)
 
-    # Recomendaciones inteligentes con LLM (opcional)
+    # Recomendaciones LLM
     smart_recs = None
     if smart_recommendations:
-        log.info("generating_smart_recommendations")
-        smart_recs = await generate_smart_recommendations(
-            global_metrics, top_flows, correlations,
-        )
+        smart_recs = await generate_smart_recommendations(global_metrics, top_flows, correlations)
 
-    # Determinar período
     period = datetime.now(tz=timezone.utc).strftime("%Y-%m")
 
-    # Generar reporte Markdown
+    # Generar reporte
     report_content = _generate_report(
         global_metrics, top_flows, correlations, abandonment,
-        priorities, lang_comparison, period,
+        priorities, region_comparison, period,
     )
 
-    # Agregar recomendaciones LLM al reporte si existen
     if smart_recs:
         report_content += "\n\n---\n\n## 🤖 Recomendaciones Inteligentes (AI)\n\n"
         for priority, items in smart_recs.items():
@@ -641,7 +491,7 @@ async def run_analyst(
     report_path = reports_dir / "insights_report.md"
     report_path.write_text(report_content, encoding="utf-8")
 
-    # Generar JSON de métricas para dashboard
+    # Métricas JSON
     metrics_summary: dict[str, Any] = {
         "generated_at": datetime.now(tz=timezone.utc).isoformat(),
         "period": period,
@@ -649,8 +499,18 @@ async def run_analyst(
         "top_frustrated_flows": top_flows,
         "unresolved_intents": correlations[:10],
         "abandonment_patterns": abandonment,
-        "lang_comparison": lang_comparison,
+        "region_comparison": region_comparison,
     }
+
+    # Búsqueda semántica
+    if use_db:
+        try:
+            semantic_insights = await _generate_semantic_insights()
+            if semantic_insights:
+                metrics_summary["semantic_insights"] = semantic_insights
+        except Exception as e:
+            log.warning("semantic_insights_failed", error=str(e))
+
     if smart_recs:
         metrics_summary["smart_recommendations"] = smart_recs
 
@@ -660,14 +520,70 @@ async def run_analyst(
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(metrics_summary, f, indent=2, ensure_ascii=False)
 
-    log.info(
-        "analyst_completado",
-        report=str(report_path),
-        metrics=str(metrics_path),
-    )
+    if use_db:
+        await _save_metrics_snapshot(period, metrics_summary)
 
-    return {
-        "report": str(report_path),
-        "metrics": str(metrics_path),
-    }
+    log.info("analyst_completado", report=str(report_path), metrics=str(metrics_path))
+    return {"report": str(report_path), "metrics": str(metrics_path)}
 
+
+# ── Búsqueda semántica con Qdrant ────────────────────────────────────────────
+
+
+async def _generate_semantic_insights() -> list[dict[str, Any]] | None:
+    """Usa Qdrant para encontrar patrones semánticos en conversaciones."""
+    from src.db.embeddings import embed_query
+    from src.db.qdrant_store import COLLECTION_NAME, get_qdrant
+
+    qdrant = get_qdrant()
+    insights = []
+
+    queries = [
+        {"query": "no me resuelven el problema, ya les dije varias veces", "pattern": "Repetición sin solución"},
+        {"query": "quiero hablar con un humano, el bot no me entiende", "pattern": "Escalación a humano"},
+        {"query": "llevo días esperando y nadie me responde", "pattern": "Abandono por espera"},
+        {"query": "me cobraron mal y no me devuelven el dinero", "pattern": "Reembolso no resuelto"},
+        {"query": "quiero cancelar mi compra, nunca más vuelvo", "pattern": "Cancelación por frustración"},
+    ]
+
+    for sq in queries:
+        try:
+            vector = embed_query(sq["query"])
+            results = qdrant.search(
+                collection_name=COLLECTION_NAME,
+                query_vector=vector,
+                limit=5,
+                score_threshold=0.7,
+            )
+            if results:
+                insights.append({
+                    "pattern": sq["pattern"],
+                    "matches_found": len(results),
+                    "top_matches": [
+                        {
+                            "session_id": r.payload.get("session_id", ""),
+                            "text_preview": r.payload.get("text_preview", ""),
+                            "similarity": round(r.score, 3),
+                        }
+                        for r in results
+                    ],
+                })
+        except Exception as e:
+            log.warning("semantic_query_failed", pattern=sq["pattern"], error=str(e))
+
+    return insights if insights else None
+
+
+# ── Persistencia de snapshots ────────────────────────────────────────────────
+
+
+async def _save_metrics_snapshot(period: str, metrics_summary: dict[str, Any]) -> None:
+    """Guarda un snapshot de métricas en Supabase."""
+    from src.db.supabase_client import get_supabase
+
+    sb = get_supabase()
+    sb.table("metrics_snapshots").upsert(
+        {"period": period, "metrics_json": metrics_summary},
+        on_conflict="period",
+    ).execute()
+    log.info("metrics_snapshot_saved", period=period)

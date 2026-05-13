@@ -328,7 +328,7 @@ function TrendChartCard() {
 
         {/* Bars */}
         <div style={{ position: "absolute", inset: "5px 0 25px 0", display: "flex", alignItems: "flex-end", gap: 16, paddingLeft: 10 }}>
-          {data.map((d, i) => {
+          {data.map((d) => {
             const sentHeight = ((d.sentimiento - 0.7) / (0.9 - 0.7)) * 100;
             const intHeight = ((d.intencion - 0.7) / (0.9 - 0.7)) * 100;
 

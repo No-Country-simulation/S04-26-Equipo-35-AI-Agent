@@ -1,3 +1,4 @@
+"use client";
 import { Download } from "lucide-react";
 import { useTheme } from "../context/theme-context";
 

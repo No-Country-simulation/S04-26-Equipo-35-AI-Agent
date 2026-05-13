@@ -45,7 +45,12 @@ conversa_crew/
 │   │   ├── etl_agent.py         # Limpieza, normalización, Pydantic validation
 │   │   ├── sentiment_agent.py   # Clasificación emocional + escalada + abandono
 │   │   ├── intent_agent.py      # Detección de intención + resolución
-│   │   └── analyst_agent.py     # Métricas, patrones, recomendaciones
+│   │   └── analyst_agent.py     # Métricas, patrones, recomendaciones + Qdrant
+│   ├── db/                      # 🆕 Capa de persistencia
+│   │   ├── supabase_client.py   # Cliente singleton de Supabase (PostgreSQL)
+│   │   ├── qdrant_store.py      # Cliente singleton de Qdrant (vectorial)
+│   │   ├── embeddings.py        # Generación de embeddings via Cohere API
+│   │   └── models.py            # Schemas Pydantic (referencia de tablas SQL)
 │   └── tools/
 │       ├── corpus_loader.py     # Carga y validación de CSV/JSONL
 │       └── aggregator.py        # Agregaciones por sesión/intent/idioma
@@ -53,7 +58,8 @@ conversa_crew/
 │   └── app.py                   # Dashboard Streamlit (5 páginas)
 ├── tests/                       # 95 tests (pytest + pytest-asyncio)
 ├── scripts/
-│   └── generate_demo_corpus.py  # Generador de corpus sintético
+│   ├── generate_demo_corpus.py  # Generador de corpus sintético
+│   └── setup_tables.sql         # 🆕 Creación de tablas en Supabase
 ├── data/
 │   ├── raw/                     # Corpus CSV de entrada
 │   └── processed/               # Outputs del pipeline
@@ -68,6 +74,7 @@ conversa_crew/
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/) (recomendado) o pip
+- [Docker](https://docs.docker.com/get-docker/) (para Qdrant, solo si usas `--use-db`)
 
 ### Instalación
 
@@ -85,13 +92,18 @@ cp .env.example .env
 # 1. Generar corpus de demo (500 sesiones, 2130 mensajes)
 python scripts/generate_demo_corpus.py
 
-# 2. Ejecutar pipeline completo
+# 2. Ejecutar pipeline completo (modo archivos — sin DB)
 python src/crew.py --corpus data/raw/demo_corpus.csv
 
 # 3. Con recomendaciones inteligentes (usa LLM — requiere API credits)
 python src/crew.py --corpus data/raw/demo_corpus.csv --smart-recommendations
 
-# 4. Abrir dashboard
+# 4. Con bases de datos (Supabase + Qdrant + Cohere embeddings)
+#    Requiere: SUPABASE_URL, SUPABASE_KEY, COHERE_API_KEY en .env
+#    Requiere: docker-compose up -d (levanta Qdrant)
+python src/crew.py --corpus data/raw/demo_corpus.csv --use-db
+
+# 5. Abrir dashboard
 streamlit run dashboard/app.py
 ```
 
