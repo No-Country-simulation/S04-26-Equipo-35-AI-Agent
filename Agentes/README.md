@@ -6,8 +6,8 @@
 
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
 [![Tests](https://img.shields.io/badge/tests-95%20passed-22c55e?style=flat-square)](tests/)
-[![CrewAI](https://img.shields.io/badge/CrewAI-multi--agent-6366f1?style=flat-square)](https://crewai.com)
-[![Streamlit](https://img.shields.io/badge/dashboard-Streamlit-ef4444?style=flat-square&logo=streamlit)](dashboard/)
+[![Pipeline](https://img.shields.io/badge/pipeline-Python-6366f1?style=flat-square)](/)
+[![Next.js](https://img.shields.io/badge/dashboard-Next.js-000?style=flat-square&logo=next.js)](../)
 
 </div>
 
@@ -39,8 +39,9 @@ CSV crudo → ETL → Sentiment → Intent → Analyst → Dashboard + Reporte
 ```
 conversa_crew/
 ├── src/
-│   ├── crew.py                  # Orquestación secuencial de agentes
-│   ├── llm_factory.py           # Abstracción Groq (dev) / Anthropic (prod)
+│   ├── cli.py                   # CLI: ingest, reset-checkpoint
+│   ├── pipeline/orchestrator.py # ETL → sentiment → intent → analyst
+│   ├── core/llm/client.py       # LiteLLM (Groq / Gemini / Anthropic)
 │   ├── agents/
 │   │   ├── etl_agent.py         # Limpieza, normalización, Pydantic validation
 │   │   ├── sentiment_agent.py   # Clasificación emocional + escalada + abandono
@@ -54,9 +55,7 @@ conversa_crew/
 │   └── tools/
 │       ├── corpus_loader.py     # Carga y validación de CSV/JSONL
 │       └── aggregator.py        # Agregaciones por sesión/intent/idioma
-├── dashboard/
-│   └── app.py                   # Dashboard Streamlit (5 páginas)
-├── tests/                       # 95 tests (pytest + pytest-asyncio)
+├── tests/                       # pytest (business_metrics, checkpoint, …)
 ├── scripts/
 │   ├── generate_demo_corpus.py  # Generador de corpus sintético
 │   └── setup_tables.sql         # 🆕 Creación de tablas en Supabase
@@ -93,41 +92,41 @@ cp .env.example .env
 python scripts/generate_demo_corpus.py
 
 # 2. Ejecutar pipeline completo (modo archivos — sin DB)
-python src/crew.py --corpus data/raw/demo_corpus.csv
+uv run python -m src.cli ingest --corpus data/raw/demo_corpus.csv
 
 # 3. Con recomendaciones inteligentes (usa LLM — requiere API credits)
-python src/crew.py --corpus data/raw/demo_corpus.csv --smart-recommendations
+uv run python -m src.cli ingest --corpus data/raw/demo_corpus.csv --smart-recommendations
 
 # 4. Con bases de datos (Supabase + Qdrant + Cohere embeddings)
 #    Requiere: SUPABASE_URL, SUPABASE_KEY, COHERE_API_KEY en .env
-#    Requiere: docker-compose up -d (levanta Qdrant)
-python src/crew.py --corpus data/raw/demo_corpus.csv --use-db
+#    Requiere: docker compose up -d (levanta Qdrant)
+uv run python -m src.cli ingest --corpus data/raw/data_conversa_ai.csv --use-db
 
-# 5. Abrir dashboard
-streamlit run dashboard/app.py
+# 5. Dashboard de producto (Next.js en la raíz del monorepo)
+cd .. && npm run dev
+
+# 6. Demo script (mini corpus + evaluate)
+cd .. && ./scripts/demo.sh
 ```
 
 ### Tests
 
 ```bash
-python -m pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ---
 
-## Dashboard (Prototipo de Referencia)
+## Dashboard de producto (Next.js)
 
-> **Nota:** El dashboard actual es un prototipo funcional que consume los outputs del pipeline. Sirve como referencia de estructura, datos disponibles y visualizaciones sugeridas para el desarrollo definitivo.
+El dashboard oficial está en la **raíz del monorepo** (`npm run dev`): Home KPIs, Reportes, Action Hub, carga de corpus (`/corpus/cargar`) y **Copiloto Analítico** con tools RAG.
 
-Prototipo con 5 páginas y dark theme:
-
-| Página | Contenido |
-|--------|-----------|
-| **Overview** | KPIs principales, intenciones no resueltas, distribución de sentimiento, heatmap frustración × turno |
-| **Sesiones Frustradas** | Top 50 sesiones con mayor frustración, explorador de conversación con sentiment coloreado |
-| **Análisis ES vs PT** | Comparación lado a lado con radar chart y barras |
-| **Recomendaciones** | Cards P1/P2/P3 color-coded con gauge de resolution rate |
-| **Reporte** | Reporte Markdown completo con descarga |
+### API de Ingesta (MLOps)
+El frontend se comunica con el backend de Python a través de endpoints REST en Next.js (`src/app/api/pipeline/*`) que interactúan con Supabase para la orquestación asíncrona:
+* `POST /api/pipeline/enqueue`: Recibe un archivo CSV o JSON e inicia/encola la ejecución de una etapa (ETL, sentimiento, intenciones, embeddings, analyst, o completo) utilizando un sistema de checkpoints.
+* `GET /api/pipeline/status`: Obtiene el estado actual del pipeline global, el checkpoint activo y las estadísticas de mensajes almacenados en la base de datos (total de mensajes, clasificados con sentimiento, intenciones identificadas, etc.).
+* `GET /api/pipeline/job/[id]`: Consulta el estado y progreso en tiempo real de un trabajo específico ( queued | processing | completed | failed ) y su posición en la cola de workers.
+* `GET /api/pipeline/history`: Recupera la lista histórica de los corpus procesados históricamente con su metadato temporal y de desempeño.
 
 ### Datos Disponibles para el Dashboard
 
@@ -151,10 +150,11 @@ reports/
 ### Variables de Entorno
 
 ```env
-GROQ_API_KEY=tu_api_key        # Requerido
-LLM_PROVIDER=groq               # groq (dev) | anthropic (prod)
-LLM_FAST=llama-3.3-70b-versatile
-LLM_SMART=qwen-qwq-32b
+GROQ_API_KEY=tu_api_key
+LLM_SMART_PROVIDER=groq
+LLM_SMART=llama-3.3-70b-versatile
+LLM_BATCH_DELAY_SEC=5
+LLM_CALL_DELAY_SEC=0.3
 ```
 
 ### Proveedores LLM
@@ -199,12 +199,12 @@ LLM_SMART=qwen-qwq-32b
 
 | Componente | Tecnología |
 |-----------|------------|
-| Orquestación | [CrewAI](https://crewai.com) |
-| LLM (dev) | [Groq](https://groq.com) via LangChain |
-| LLM (prod) | [Anthropic](https://anthropic.com) via LangChain |
+| Orquestación | Python asyncio (`pipeline/orchestrator`) |
+| LLM | [LiteLLM](https://github.com/BerriAI/litellm) → Groq / Gemini / Anthropic |
+| Dashboard | Next.js (raíz del repo) |
 | Validación | Pydantic v2 |
 | Procesamiento | pandas |
-| Dashboard | Streamlit + Plotly |
+| Dashboard | Next.js (raíz del monorepo) |
 | Logging | structlog |
 | Tests | pytest + pytest-asyncio |
 | Detección idioma | langdetect |

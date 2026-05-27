@@ -14,6 +14,7 @@ Cuando use_db=True, persiste a Supabase y Qdrant.
 import json
 import re
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -159,6 +160,7 @@ def _select_text_by_region(row: pd.Series) -> str:
 async def run_etl_pipeline(
     corpus_path: str,
     use_db: bool = False,
+    on_progress: "Callable[[int, int, str], None] | None" = None,
 ) -> dict[str, int | float]:
     """
     Ejecuta el pipeline ETL sobre el corpus real.
@@ -282,8 +284,8 @@ async def run_etl_pipeline(
     }
 
     # 10. Persistir a bases de datos
-    if use_db:
-        await _persist_to_databases(valid_turns)
+    if use_db and valid_turns:
+        await _persist_to_databases(valid_turns, on_progress=on_progress)
 
     log.info("etl_completado", **stats)
     return stats
@@ -292,7 +294,10 @@ async def run_etl_pipeline(
 # ── Persistencia a bases de datos ────────────────────────────────────────────
 
 
-async def _persist_to_databases(valid_turns: list[dict]) -> None:
+async def _persist_to_databases(
+    valid_turns: list[dict],
+    on_progress: "Callable[[int, int, str], None] | None" = None,
+) -> None:
     """
     Persiste los datos limpios a Supabase (SQL) y Qdrant (vectorial).
     """
@@ -375,8 +380,13 @@ async def _persist_to_databases(valid_turns: list[dict]) -> None:
     log.info("db_messages_upserted", count=len(message_rows))
 
     # ── 3. Embeddings + Qdrant ───────────────────────────────────────────
-    if user_texts:
-        vectors = embed_texts(user_texts)
+    import os
+    skip_embeddings = os.getenv("SKIP_EMBEDDINGS", "").lower() in ("1", "true", "yes")
+    if user_texts and not skip_embeddings:
+        def _embed_progress(done: int, total: int) -> None:
+            if on_progress:
+                on_progress(done, total, "etl_embeddings")
+        vectors = embed_texts(user_texts, on_progress=_embed_progress)
         points = [
             PointStruct(id=pid, vector=vec, payload=meta)
             for pid, vec, meta in zip(user_point_ids, vectors, user_metadata)
@@ -388,5 +398,7 @@ async def _persist_to_databases(valid_turns: list[dict]) -> None:
                 points=points[i : i + qdrant_batch],
             )
         log.info("qdrant_points_upserted", count=len(points))
+    elif skip_embeddings:
+        log.info("qdrant_embeddings_skipped", reason="SKIP_EMBEDDINGS=true")
 
     log.info("db_persist_completed")

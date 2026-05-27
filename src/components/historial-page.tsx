@@ -1,29 +1,17 @@
+"use client";
+
 import { useState } from "react";
 import Link from "next/link";
 import { DashboardShell } from "./dashboard-shell";
 import { Sidebar } from "./sidebar";
 import { useTheme } from "../context/theme-context";
 import { ChevronDown, ChevronUp } from "lucide-react";
-
-type ExecutionRow = {
-  id: number;
-  file: string;
-  date: string;
-  messages: string;
-  duration: string;
-  status: "success" | "warning" | "error";
-  statusLabel: string;
-  f1Score: string | null;
-  details?: {
-    stats: Array<{ label: string; value: string; isWarning?: boolean }>;
-    logs: Array<{ time: string; message: string; color: string }>;
-  };
-};
+import type { PipelineRunItem } from "../lib/api";
 
 // ─── Main Table ───────────────────────────────────────────────────────────────
-function HistorialTable() {
+function HistorialTable({ runs }: { runs: PipelineRunItem[] }) {
   const { colors } = useTheme();
-  const [expandedId, setExpandedId] = useState<number>(1);
+  const [expandedId, setExpandedId] = useState<number | null>(null);
 
   const card: React.CSSProperties = {
     backgroundColor: colors.card,
@@ -32,85 +20,29 @@ function HistorialTable() {
     overflow: "hidden",
   };
 
-  const executions: ExecutionRow[] = [
-    {
-      id: 1,
-      file: "corpus_abril_2025.csv",
-      date: "01 abr 2025 · 09:12",
-      messages: "2.13M",
-      duration: "9m 42s",
-      status: "warning",
-      statusLabel: "advertencia",
-      f1Score: "0.847",
-      details: {
-        stats: [
-          { label: "ES", value: "1.40M" },
-          { label: "PT", value: "734k" },
-          { label: "Errores no críticos", value: "842" },
-          { label: "F1 intención", value: "0.791" },
-          { label: "F1 sentim. PT", value: "0.762 ⚑", isWarning: true },
-        ],
-        logs: [
-          { time: "09:12:01", message: "✓ Validación — 2.134.872 filas · 0 errores críticos", color: colors.accent },
-          { time: "09:12:34", message: "✓ Limpieza — ES: 1.4M · PT: 734k", color: colors.accent },
-          { time: "09:13:10", message: "⚑ 842 mensajes con encoding inusual — normalizados", color: colors.warning },
-          { time: "09:14:02", message: "✓ Embeddings completados", color: colors.accent },
-          { time: "09:17:44", message: "✓ Clasificación completada", color: colors.accent },
-          { time: "09:21:54", message: "✓ Agregación completada · pipeline finalizado", color: colors.accent },
-        ],
-      },
-    },
-    {
-      id: 2,
-      file: "corpus_marzo_2025.csv",
-      date: "02 mar 2025",
-      messages: "1.98M",
-      duration: "8m 19s",
-      status: "success",
-      statusLabel: "exitoso",
-      f1Score: "0.835",
-    },
-    {
-      id: 3,
-      file: "corpus_febrero_2025.csv",
-      date: "01 feb 2025",
-      messages: "2.04M",
-      duration: "8m 55s",
-      status: "success",
-      statusLabel: "exitoso",
-      f1Score: "0.841",
-    },
-    {
-      id: 4,
-      file: "corpus_enero_2025.csv",
-      date: "03 ene 2025",
-      messages: "1.87M",
-      duration: "7m 48s",
-      status: "success",
-      statusLabel: "exitoso",
-      f1Score: "0.839",
-    },
-    {
-      id: 5,
-      file: "corpus_dic_2024_v2.csv",
-      date: "05 dic 2024",
-      messages: "2.21M",
-      duration: "10m 02s",
-      status: "success",
-      statusLabel: "exitoso",
-      f1Score: "0.830",
-    },
-    {
-      id: 6,
-      file: "corpus_dic_2024_v1.csv",
-      date: "01 dic 2024",
-      messages: "—",
-      duration: "1m 12s",
-      status: "error",
-      statusLabel: "fallido",
-      f1Score: null,
-    },
-  ];
+  if (runs.length === 0) {
+    return (
+      <div style={{ ...card, padding: 24 }}>
+        <div style={{ color: colors.textMuted, fontSize: 13 }}>
+          No hay ejecuciones aún. Iniciá el pipeline desde la pestaña Pipeline datos.
+        </div>
+      </div>
+    );
+  }
+
+  const formatDate = (iso: string) => {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    return d.toLocaleDateString("es", { day: "2-digit", month: "short", year: "numeric" }) +
+      " · " + d.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+  };
+
+  const formatDuration = (start: string, end: string | null) => {
+    if (!end) return "en curso…";
+    const secs = Math.round((new Date(end).getTime() - new Date(start).getTime()) / 1000);
+    if (secs < 60) return `${secs}s`;
+    return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  };
 
   const getStatusBg = (status: string) => {
     if (status === "success") return "rgba(0,196,154,0.13)";
@@ -122,11 +54,6 @@ function HistorialTable() {
     if (status === "success") return "#00C49A";
     if (status === "warning") return "#F5A623";
     return "#FF6B6B";
-  };
-
-  const getF1Color = (status: string) => {
-    if (status === "warning") return "#F5A623";
-    return "#00C49A";
   };
 
   return (
@@ -157,17 +84,29 @@ function HistorialTable() {
           Estado
         </div>
         <div style={{ color: colors.textSecondary, fontSize: 11, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-          F1 sentim.
+          Calidad análisis
         </div>
         <div />
       </div>
 
       {/* Table Rows */}
-      {executions.map((exec, idx) => {
-        const isExpanded = expandedId === exec.id;
+      {runs.map((run, idx) => {
+        const isExpanded = expandedId === run.id;
+        const exec = {
+          id: run.id,
+          file: run.corpus_file.split("/").pop() ?? run.corpus_file,
+          date: formatDate(run.started_at),
+          messages: run.total_messages > 999
+            ? (run.total_messages / 1000).toFixed(1) + "k"
+            : run.total_messages.toString(),
+          duration: formatDuration(run.started_at, run.completed_at),
+          status: run.status === "completed" ? "success" : run.status === "running" ? "warning" : "error",
+          statusLabel: run.status === "completed" ? "exitoso" : run.status === "running" ? "en curso" : "fallido",
+          errorMsg: run.error_message,
+        };
         const rowBg = isExpanded ? colors.background : colors.card;
         return (
-          <div key={exec.id}>
+          <div key={run.id}>
             {/* Main Row */}
             <div
               className="grid gap-4 cursor-pointer transition-colors"
@@ -175,9 +114,9 @@ function HistorialTable() {
                 gridTemplateColumns: "2fr 1.5fr 0.8fr 0.8fr 1fr 0.8fr 60px",
                 padding: "14px 16px",
                 backgroundColor: rowBg,
-                borderBottom: isExpanded ? "none" : idx < executions.length - 1 ? `1px solid ${colors.border}` : "none",
+                borderBottom: isExpanded ? "none" : idx < runs.length - 1 ? `1px solid ${colors.border}` : "none",
               }}
-              onClick={() => setExpandedId(isExpanded ? 0 : exec.id)}
+              onClick={() => setExpandedId(isExpanded ? null : run.id)}
               onMouseEnter={(e) => {
                 if (!isExpanded) {
                   (e.currentTarget as HTMLDivElement).style.backgroundColor = "rgba(26,143,227,0.03)";
@@ -209,8 +148,8 @@ function HistorialTable() {
                   {exec.statusLabel}
                 </span>
               </div>
-              <div style={{ color: exec.f1Score ? getF1Color(exec.status) : colors.textSecondary, fontSize: 12 }}>
-                {exec.f1Score || "—"}
+              <div style={{ color: colors.textMuted, fontSize: 12 }}>
+                —
               </div>
               <div className="flex items-center justify-center">
                 {isExpanded ? (
@@ -226,49 +165,31 @@ function HistorialTable() {
             </div>
 
             {/* Expanded Details */}
-            {isExpanded && exec.details && (
+            {isExpanded && (
               <div
                 style={{
                   backgroundColor: colors.background,
                   padding: "14px 16px",
-                  borderBottom: idx < executions.length - 1 ? `1px solid ${colors.border}` : "none",
+                  borderBottom: idx < runs.length - 1 ? `1px solid ${colors.border}` : "none",
                 }}
               >
-                {/* Stats pills */}
-                <div className="flex flex-wrap gap-2" style={{ marginBottom: 10 }}>
-                  {exec.details.stats.map((stat, i) => (
-                    <div
-                      key={i}
-                      style={{
-                        backgroundColor: colors.card,
-                        borderRadius: 6,
-                        padding: "3px 8px",
-                        fontSize: 11,
-                        color: stat.isWarning ? colors.warning : colors.textSecondary,
-                        border: stat.isWarning ? "1px solid #F5A623" : "none",
-                      }}
-                    >
-                      {stat.label}: {stat.value}
+                <div className="flex flex-wrap gap-2">
+                  <div style={{ backgroundColor: colors.card, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: colors.textSecondary }}>
+                    Mensajes: {run.total_messages.toLocaleString("es")}
+                  </div>
+                  <div style={{ backgroundColor: colors.card, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: colors.textSecondary }}>
+                    Sesiones: {run.total_sessions.toLocaleString("es")}
+                  </div>
+                  {run.completed_at && (
+                    <div style={{ backgroundColor: colors.card, borderRadius: 6, padding: "3px 8px", fontSize: 11, color: colors.textSecondary }}>
+                      Fin: {formatDate(run.completed_at)}
                     </div>
-                  ))}
-                </div>
-
-                {/* Log box */}
-                <div
-                  style={{
-                    backgroundColor: colors.card,
-                    borderRadius: 8,
-                    padding: 12,
-                    fontFamily: "monospace",
-                  }}
-                >
-                  {exec.details.logs.map((log, i) => (
-                    <div key={i} style={{ marginBottom: i < exec.details!.logs.length - 1 ? 6 : 0 }}>
-                      <span style={{ color: colors.textSecondary, fontSize: 11 }}>{log.time}</span>
-                      <span style={{ color: colors.textSecondary, fontSize: 11 }}> · </span>
-                      <span style={{ color: log.color, fontSize: 11 }}>{log.message}</span>
+                  )}
+                  {run.error_message && (
+                    <div style={{ backgroundColor: "rgba(255,107,107,0.1)", borderRadius: 6, padding: "3px 8px", fontSize: 11, color: "#FF6B6B", border: "1px solid #FF6B6B" }}>
+                      {run.error_message}
                     </div>
-                  ))}
+                  )}
                 </div>
               </div>
             )}
@@ -279,49 +200,8 @@ function HistorialTable() {
   );
 }
 
-// ─── Pagination ───────────────────────────────────────────────────────────────
-function Pagination() {
-  const { colors } = useTheme();
-
-  return (
-    <div className="flex items-center justify-between">
-      <div style={{ color: colors.textSecondary, fontSize: 12 }}>
-        Mostrando 6 de 12 ejecuciones
-      </div>
-      <div className="flex gap-2">
-        <button
-          style={{
-            color: colors.textSecondary,
-            fontSize: 12,
-            border: `1px solid ${colors.textSecondary}`,
-            borderRadius: 6,
-            padding: "6px 12px",
-            backgroundColor: "transparent",
-            cursor: "pointer",
-          }}
-        >
-          ← Anterior
-        </button>
-        <button
-          style={{
-            color: colors.textSecondary,
-            fontSize: 12,
-            border: `1px solid ${colors.textSecondary}`,
-            borderRadius: 6,
-            padding: "6px 12px",
-            backgroundColor: "transparent",
-            cursor: "pointer",
-          }}
-        >
-          Siguiente →
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ─── Full Page ────────────────────────────────────────────────────────────────
-export function HistorialPage() {
+export function HistorialPage({ runs }: { runs: PipelineRunItem[] }) {
   const { colors } = useTheme();
 
   return (
@@ -340,38 +220,17 @@ export function HistorialPage() {
           </nav>
 
           {/* Page Header */}
-          <div className="flex items-start justify-between">
-            <div>
-              <h1 style={{ color: colors.textPrimary, fontSize: 18, fontWeight: 600, margin: 0 }}>
-                Historial de ejecuciones
-              </h1>
-              <p style={{ color: colors.textSecondary, fontSize: 11, margin: "4px 0 0 0" }}>
-                12 ejecuciones en los últimos 6 meses
-              </p>
-            </div>
-            <select
-              style={{
-                color: colors.textSecondary,
-                fontSize: 12,
-                border: `1px solid ${colors.textSecondary}`,
-                borderRadius: 6,
-                padding: "6px 12px",
-                backgroundColor: "transparent",
-                cursor: "pointer",
-              }}
-            >
-              <option>Todos los estados</option>
-              <option>Exitoso</option>
-              <option>Advertencia</option>
-              <option>Fallido</option>
-            </select>
+          <div>
+            <h1 style={{ color: colors.textPrimary, fontSize: 18, fontWeight: 600, margin: 0 }}>
+              Historial de ejecuciones
+            </h1>
+            <p style={{ color: colors.textSecondary, fontSize: 11, margin: "4px 0 0 0" }}>
+              {runs.length} ejecuciones registradas
+            </p>
           </div>
 
           {/* Table */}
-          <HistorialTable />
-
-          {/* Pagination */}
-          <Pagination />
+          <HistorialTable runs={runs} />
     </DashboardShell>
   );
 }

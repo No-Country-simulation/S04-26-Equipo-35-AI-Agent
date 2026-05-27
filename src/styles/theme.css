@@ -1,6 +1,19 @@
 @custom-variant dark (&:is(.dark *));
 
+/* Accesibilidad: foco visible en controles interactivos */
+:focus-visible {
+  outline: 2px solid var(--product-accent, #10b981);
+  outline-offset: 2px;
+}
+
 :root {
+  /* ConversaAI product cockpit */
+  --product-accent: #6366f1;
+  --product-accent-muted: rgba(99, 102, 241, 0.12);
+  --product-surface: #f4f4f5;
+  --product-elevated: #ffffff;
+  --product-danger: #ef4444;
+  --product-warning: #f59e0b;
   --font-size: 16px;
   --background: #ffffff;
   --foreground: oklch(0.145 0 0);
@@ -42,6 +55,12 @@
 }
 
 .dark {
+  --product-accent: #818cf8;
+  --product-accent-muted: rgba(129, 140, 248, 0.12);
+  --product-surface: #09090b;
+  --product-elevated: #0c0c0f;
+  --product-danger: #f87171;
+  --product-warning: #fbbf24;
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.145 0 0);

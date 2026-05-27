@@ -51,7 +51,7 @@ export function FrustrationFlows({ data }: { data?: FlowFrustration[] }) {
           marginBottom: 16,
         }}
       >
-        FLUJOS CON MÁS FRUSTRACIÓN
+        PUNTOS DE MAYOR FRICCIÓN
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
         {rows.map((r) => (
@@ -82,7 +82,7 @@ export function FrustrationFlows({ data }: { data?: FlowFrustration[] }) {
               </div>
             </Link>
           ) : (
-            <div key={r.name} className="flex items-center" style={{ height: 32, gap: 12 }}>
+            <div key={r.name} className="flex items-center hover:opacity-80 transition-opacity" style={{ height: 32, gap: 12, cursor: "default" }}>
               <div style={{ width: 110, color: colors.textPrimary, fontSize: 12 }}>{r.name}</div>
               <div className="flex-1 overflow-hidden" style={{ backgroundColor: colors.background, height: 8, borderRadius: 4 }}>
                 <div
@@ -104,7 +104,7 @@ export function FrustrationFlows({ data }: { data?: FlowFrustration[] }) {
         ))}
       </div>
       <div style={{ color: colors.accent, fontSize: 11, marginTop: "auto" }}>
-        Click en un flujo para ver detalle →
+        Ver detalle por punto de contacto →
       </div>
     </div>
   );

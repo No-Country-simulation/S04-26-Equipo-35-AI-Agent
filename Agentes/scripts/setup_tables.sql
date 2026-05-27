@@ -103,6 +103,58 @@ CREATE TABLE IF NOT EXISTS metrics_snapshots (
     UNIQUE (period)
 );
 
+-- ── Tabla: user_stories ─────────────────────────────────────────────────────
+-- User Stories generadas automáticamente por el Analyst Agent.
+-- El dashboard las consume para el "Centro de Acción" (Action Hub).
+
+CREATE TABLE IF NOT EXISTS user_stories (
+    id                      BIGSERIAL PRIMARY KEY,
+    story_id                TEXT NOT NULL,          -- US-001, US-002...
+    period                  TEXT NOT NULL,           -- YYYY-MM
+    priority                TEXT NOT NULL CHECK (priority IN ('P1', 'P2', 'P3')),
+    severity                TEXT NOT NULL CHECK (severity IN ('crítico', 'alto', 'medio')),
+    intent                  TEXT NOT NULL,
+    title                   TEXT NOT NULL,
+    user_story              TEXT NOT NULL,           -- "Como [rol], quiero [acción]..."
+    acceptance_criteria     TEXT,                    -- Formato Gherkin
+    success_metric          TEXT,
+    affected_sessions       INTEGER DEFAULT 0,
+    current_unresolved_pct  REAL DEFAULT 0,
+    current_avg_frustration REAL DEFAULT 0,
+    status                  TEXT DEFAULT 'backlog' CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    created_at              TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (story_id, period)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_stories_priority ON user_stories(priority);
+CREATE INDEX IF NOT EXISTS idx_user_stories_period ON user_stories(period);
+CREATE INDEX IF NOT EXISTS idx_user_stories_status ON user_stories(status);
+
+-- ── Tabla: action_items ─────────────────────────────────────────────────────
+-- Plan de acción del equipo de producto. Cada fila es una tarjeta del Kanban.
+
+CREATE TABLE IF NOT EXISTS action_items (
+    id              BIGSERIAL PRIMARY KEY,
+    title           TEXT NOT NULL,
+    description     TEXT DEFAULT '',
+    source_type     TEXT DEFAULT 'manual',          -- 'intent' | 'flow' | 'manual'
+    source_id       TEXT,                            -- intent key o flow id de origen
+    severity        TEXT DEFAULT 'medium' CHECK (severity IN ('critical', 'high', 'medium', 'low')),
+    impact_score    REAL DEFAULT 0,
+    status          TEXT DEFAULT 'detected' CHECK (status IN ('detected', 'analyzing', 'in_progress', 'resolved')),
+    assignee        TEXT,
+    notes           TEXT,
+    is_suggestion   BOOLEAN DEFAULT FALSE,
+    corpus_run_id   BIGINT REFERENCES pipeline_runs(id) ON DELETE SET NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_items_status   ON action_items(status);
+CREATE INDEX IF NOT EXISTS idx_action_items_severity ON action_items(severity);
+CREATE INDEX IF NOT EXISTS idx_action_items_source   ON action_items(source_type, source_id);
+
 -- ── Row Level Security (RLS) ────────────────────────────────────────────────
 -- Habilitar RLS pero permitir acceso con la service_role key.
 -- Para producción, ajustar políticas según necesidad.
@@ -111,6 +163,7 @@ ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pipeline_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE metrics_snapshots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_stories ENABLE ROW LEVEL SECURITY;
 
 -- Política permisiva para service_role (los agentes Python usan service_role key)
 -- DROP + CREATE porque PostgreSQL no soporta CREATE POLICY IF NOT EXISTS
@@ -125,6 +178,13 @@ CREATE POLICY "allow_all_pipeline_runs" ON pipeline_runs FOR ALL USING (true);
 
 DROP POLICY IF EXISTS "allow_all_metrics_snapshots" ON metrics_snapshots;
 CREATE POLICY "allow_all_metrics_snapshots" ON metrics_snapshots FOR ALL USING (true);
+
+DROP POLICY IF EXISTS "allow_all_user_stories" ON user_stories;
+CREATE POLICY "allow_all_user_stories" ON user_stories FOR ALL USING (true);
+
+ALTER TABLE action_items ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "allow_all_action_items" ON action_items;
+CREATE POLICY "allow_all_action_items" ON action_items FOR ALL USING (true);
 
 -- ============================================================================
 -- ✅ Setup completado. Las tablas están listas para el pipeline.

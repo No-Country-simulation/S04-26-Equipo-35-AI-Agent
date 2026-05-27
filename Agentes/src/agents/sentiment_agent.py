@@ -10,6 +10,7 @@ para calibrar la clasificación del LLM.
 
 Cuando use_db=True, persiste resultados a Supabase.
 """
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ import pandas as pd
 import structlog
 from pydantic import BaseModel, Field, ValidationError
 
-from src.llm_factory import get_llm
+from src.core.llm.client import get_llm
 
 log = structlog.get_logger()
 
@@ -42,54 +43,21 @@ BATCH_SIZE = int(os.getenv("SENTIMENT_BATCH_SIZE", "50"))
 # ── Prompt de clasificación ──────────────────────────────────────────────────
 
 SENTIMENT_PROMPT = """
-Eres una psicóloga organizacional experta en análisis emocional de conversaciones
-de soporte al cliente en español LATAM y portugués brasileño.
+Clasifica el sentimiento de cada mensaje de soporte al cliente (ES-LATAM o PT-BR).
+Label: frustrado | neutro | satisfecho. Score: 0.0-1.0. Nivel_frust: señal extra (0=bajo,2=alto).
 
-Clasifica el sentimiento del siguiente mensaje de un usuario.
+Mensajes (JSON array):
+{batch_json}
 
-Mensaje: {text}
-Nivel de frustración preexistente (0=bajo, 1=medio, 2=alto): {nivel_frustracion}
-
-Responde SOLO con JSON válido, sin explicación:
-{{
-  "label": "frustrado|neutro|satisfecho",
-  "score": 0.0
-}}
-
-## Calibración de Intensidad (score 0.0 a 1.0)
-
-### frustrado
-- 0.3-0.4: Molestia leve → "no funciona", "no carga"
-- 0.5-0.6: Frustración clara → "ya les dije", "no me entienden"
-- 0.7-0.8: Ira contenida → "esto es inaceptable", "llevo 3 días"
-- 0.9-1.0: Ira explosiva → "PÉSIMO", "ES UN ROBO", insultos
-
-### neutro
-- 0.4-0.6: Sin carga emocional → "cuánto debo", "quiero saber mi saldo"
-
-### satisfecho
-- 0.6-0.7: Aceptación → "ok, gracias"
-- 0.8-1.0: Gratitud → "perfecto, funcionó", "excelente servicio"
-
-## Señales Clave (ES LATAM)
-- "no sirve", "pésimo", "qué mal" → frustrado
-- "ya chole" (MX), "qué vaina" (CO) → frustrado 0.7+
-- MAYÚSCULAS SOSTENIDAS → subir score +0.2
-- Signos repetidos "???" "!!!" → subir score +0.1
-
-## Señales Clave (PT-BR)
-- "não funciona", "horrível", "que absurdo" → frustrado
-- "péssimo atendimento" → frustrado 0.8+
-- "obrigado", "funcionou", "resolvido" → satisfecho
-
-## IMPORTANTE
-- El nivel de frustración preexistente es una señal adicional:
-  nivel 0 = probablemente neutro, nivel 2 = probablemente frustrado alto
-- Tu clasificación debe basarse PRINCIPALMENTE en el texto
+Responde ONLY con un JSON array del mismo tamaño, sin texto extra:
+[{{"label":"...","score":0.0}}, ...]
 """
 
 
 # ── Clasificación con LLM ───────────────────────────────────────────────────
+
+
+MINI_BATCH = int(os.getenv("SENTIMENT_MINI_BATCH", "10"))
 
 
 async def _classify_sentiment_batch(
@@ -98,37 +66,47 @@ async def _classify_sentiment_batch(
 ) -> list[SentimentResult]:
     """
     Clasifica sentimiento para un batch de textos usando el LLM.
-
-    Args:
-        texts: Lista de textos a clasificar.
-        niveles: Lista de niveles de frustración (0-2) del CSV.
-
-    Returns:
-        Lista de SentimentResult.
+    Envía MINI_BATCH mensajes por llamada para reducir uso de tokens.
     """
     llm = get_llm(role="smart")
     results: list[SentimentResult] = []
 
-    for text, nivel in zip(texts, niveles):
+    for chunk_start in range(0, len(texts), MINI_BATCH):
+        chunk_texts = texts[chunk_start:chunk_start + MINI_BATCH]
+        chunk_niveles = niveles[chunk_start:chunk_start + MINI_BATCH]
+        batch_items = [
+            {"id": i, "text": t[:400], "nivel_frust": n}
+            for i, (t, n) in enumerate(zip(chunk_texts, chunk_niveles))
+        ]
+        prompt = SENTIMENT_PROMPT.format(batch_json=json.dumps(batch_items, ensure_ascii=False))
         try:
-            prompt = SENTIMENT_PROMPT.format(
-                text=text, nivel_frustracion=nivel,
-            )
             response = llm.invoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
-
-            parsed = json.loads(content)
-            result = SentimentResult(
-                sentiment_label=parsed.get("label", "neutro"),
-                sentiment_score=parsed.get("score", 0.5),
-            )
-        except (json.JSONDecodeError, ValidationError, Exception) as e:
-            log.warning("sentiment_parse_error", text=text[:50], error=str(e))
-            # Fallback basado en nivel_frustracion
-            result = _fallback_from_nivel(nivel)
-        results.append(result)
+            raw = json.loads(content)
+            if not isinstance(raw, list):
+                raise ValueError("expected list")
+            for item in raw:
+                try:
+                    label = item.get("label", "neutro")
+                    score = float(item.get("score", 0.5))
+                    results.append(SentimentResult(
+                        sentiment_label=label if label in ("frustrado", "neutro", "satisfecho") else "neutro",
+                        sentiment_score=max(0.0, min(1.0, score)),
+                    ))
+                except Exception:
+                    results.append(SentimentResult(sentiment_label="neutro", sentiment_score=0.5))
+            if len(results) < chunk_start + len(chunk_texts):
+                for _ in range(chunk_start + len(chunk_texts) - len(results)):
+                    results.append(SentimentResult(sentiment_label="neutro", sentiment_score=0.5))
+        except Exception as e:
+            log.warning("sentiment_chunk_failed", error=str(e), chunk_start=chunk_start)
+            for n in chunk_niveles:
+                results.append(_fallback_from_nivel(n))
+        continue
 
     return results
+
+
 
 
 def _fallback_from_nivel(nivel: int) -> SentimentResult:
@@ -165,11 +143,23 @@ def detect_escalation(session_turns: pd.DataFrame) -> pd.Series:
         escalation = rapid_increase & frustrado_mask
 
     # También escalada si nivel_frustracion pasa de 1 a 2
-    niveles = session_turns["nivel_frustracion"].fillna(0).astype(int)
-    if len(niveles) >= 2:
-        nivel_diffs = niveles.diff()
-        nivel_escalation = (nivel_diffs > 0) & (niveles >= 2)
-        escalation = escalation | nivel_escalation
+    if "nivel_frustracion" in session_turns.columns:
+        niveles = session_turns["nivel_frustracion"].fillna(0).astype(int)
+        if len(niveles) >= 2:
+            nivel_diffs = niveles.diff()
+            nivel_escalation = (nivel_diffs > 0) & (niveles >= 2)
+            escalation = escalation | nivel_escalation
+
+    # También escalada si misma frase repetida > 2 veces
+    if "text_clean" in session_turns.columns:
+        from collections import Counter
+        texts = session_turns["text_clean"].dropna().tolist()
+        text_counts = Counter(texts)
+        repeated_texts = {t for t, c in text_counts.items() if c > 2 and len(t.strip()) > 0}
+        if repeated_texts:
+            for idx, row in session_turns.iterrows():
+                if row.get("text_clean") in repeated_texts:
+                    escalation.at[idx] = True
 
     return escalation.fillna(False)
 
@@ -224,38 +214,81 @@ async def run_sentiment_analysis(
     path = Path(processed_path)
     if not path.exists():
         raise FileNotFoundError(f"Corpus procesado no encontrado: {path}")
-
-    log.info("sentiment_starting", processed_path=str(path))
-
     df = pd.read_json(path, lines=True)
 
-    # Inicializar columnas de sentiment
-    df["sentiment_label"] = None
-    df["sentiment_score"] = None
-    df["escalation"] = False
-    df["abandonment_risk"] = False
+    # Inicializar columnas si no existen
+    if "sentiment_label" not in df.columns:
+        df["sentiment_label"] = None
+    if "sentiment_score" not in df.columns:
+        df["sentiment_score"] = None
+    if "escalation" not in df.columns:
+        df["escalation"] = False
+    if "abandonment_risk" not in df.columns:
+        df["abandonment_risk"] = False
 
-    # Clasificar todos los turnos (todos son de usuario en este dataset)
-    texts = df["text_clean"].tolist()
-    niveles = df["nivel_frustracion"].fillna(0).astype(int).tolist()
+    if use_db:
+        from src.db.supabase_client import get_supabase
+        sb = get_supabase()
+        
+        session_ids = df["session_id"].unique().tolist()
+        db_rows = []
+        chunk_size = 100
+        for i in range(0, len(session_ids), chunk_size):
+            chunk = session_ids[i : i + chunk_size]
+            res = sb.table("messages").select(
+                "session_id,turn_id,sentiment_label,sentiment_score,escalation,abandonment_risk"
+            ).in_("session_id", chunk).execute()
+            if res.data:
+                db_rows.extend(res.data)
+                
+        if db_rows:
+            db_df = pd.DataFrame(db_rows)
+            df = df.merge(db_df, on=["session_id", "turn_id"], how="left", suffixes=("_local", ""))
+            for col in ["sentiment_label", "sentiment_score", "escalation", "abandonment_risk"]:
+                local_col = f"{col}_local"
+                if local_col in df.columns:
+                    df[col] = df[col].fillna(df[local_col])
+                    df.drop(columns=[local_col], inplace=True)
 
-    if texts:
+    log.info("sentiment_starting", processed_path=str(path), rows=len(df))
+
+    # Solo procesar filas sin label (resume desde donde se cortó)
+    pending_mask = df["sentiment_label"].isna()
+    pending_indices = df.index[pending_mask].tolist()
+    already_done = len(df) - len(pending_indices)
+    if already_done > 0:
+        log.info("sentiment_resuming", already_labeled=already_done, pending=len(pending_indices))
+
+    if pending_indices:
+        texts = df.loc[pending_indices, "text_clean"].tolist()
+        niveles = df.loc[pending_indices, "nivel_frustracion"].fillna(0).astype(int).tolist()
+
         all_results: list[SentimentResult] = []
         for i in range(0, len(texts), BATCH_SIZE):
             batch_texts = texts[i : i + BATCH_SIZE]
             batch_niveles = niveles[i : i + BATCH_SIZE]
             batch_results = await _classify_sentiment_batch(batch_texts, batch_niveles)
             all_results.extend(batch_results)
+
+            # Actualizar df con resultados del batch
+            batch_df_indices = pending_indices[i : i + BATCH_SIZE]
+            for list_i, df_idx in enumerate(batch_df_indices[:len(batch_results)]):
+                df.at[df_idx, "sentiment_label"] = batch_results[list_i].sentiment_label
+                df.at[df_idx, "sentiment_score"] = batch_results[list_i].sentiment_score
+
+            # Persistir batch a Supabase inmediatamente (checkpoint por batch)
+            if use_db:
+                await _persist_batch_sentiment_to_db(df.loc[batch_df_indices])
+
             log.info(
                 "sentiment_batch_done",
                 batch_num=i // BATCH_SIZE + 1,
-                processed=len(all_results),
-                total=len(texts),
+                processed=already_done + len(all_results),
+                total=len(df),
             )
-
-        for idx, result in enumerate(all_results):
-            df.at[idx, "sentiment_label"] = result.sentiment_label
-            df.at[idx, "sentiment_score"] = result.sentiment_score
+            delay = float(os.getenv("LLM_BATCH_DELAY_SEC", "2"))
+            if delay > 0 and i + BATCH_SIZE < len(texts):
+                await asyncio.sleep(delay)
 
     # Detectar escalada y abandono por sesión
     for _, session_df in df.groupby("session_id"):
@@ -285,33 +318,59 @@ async def run_sentiment_analysis(
 # ── Persistencia a Supabase ──────────────────────────────────────────────────
 
 
+async def _persist_batch_sentiment_to_db(batch_df: pd.DataFrame) -> None:
+    """Persiste un batch de filas con sentiment a Supabase (checkpoint por batch)."""
+    from src.db.supabase_client import get_supabase
+    sb = get_supabase()
+    rows_to_upsert = []
+    for _, row in batch_df.iterrows():
+        score = row.get("sentiment_score")
+        if row.get("sentiment_label") is None:
+            continue
+        rows_to_upsert.append({
+            "session_id": row["session_id"],
+            "turn_id": int(row["turn_id"]),
+            "sentiment_label": row.get("sentiment_label"),
+            "sentiment_score": float(score) if score is not None and str(score) != "nan" else None,
+        })
+    if rows_to_upsert:
+        sb.table("messages").upsert(rows_to_upsert, on_conflict="session_id,turn_id").execute()
+        log.debug("db_sentiment_batch_saved", count=len(rows_to_upsert))
+
+
 async def _persist_sentiment_to_db(df: pd.DataFrame) -> None:
-    """Actualiza las columnas de sentiment en Supabase."""
+    """Actualiza las columnas de sentiment en Supabase usando batch upsert."""
     from src.db.supabase_client import get_supabase
 
     sb = get_supabase()
     log.info("db_sentiment_updating", count=len(df))
 
+    # 1. Agrupar y subir mensajes en batches
+    message_rows = []
     for _, row in df.iterrows():
         score = row.get("sentiment_score")
-        update_data = {
+        message_rows.append({
+            "session_id": row["session_id"],
+            "turn_id": int(row["turn_id"]),
             "sentiment_label": row.get("sentiment_label"),
-            "sentiment_score": (
-                float(score)
-                if score is not None and str(score) != "nan"
-                else None
-            ),
+            "sentiment_score": float(score) if score is not None and str(score) != "nan" else None,
             "escalation": bool(row.get("escalation", False)),
             "abandonment_risk": bool(row.get("abandonment_risk", False)),
-        }
-        sb.table("messages").update(update_data).eq(
-            "session_id", row["session_id"]
-        ).eq("turn_id", int(row["turn_id"])).execute()
+        })
 
-    # Actualizar métricas agregadas en sessions
+    batch_size = 500
+    for i in range(0, len(message_rows), batch_size):
+        sb.table("messages").upsert(
+            message_rows[i : i + batch_size],
+            on_conflict="session_id,turn_id"
+        ).execute()
+
+    # 2. Agrupar y subir sesiones en batches
+    session_rows = []
     for session_id, session_df in df.groupby("session_id"):
         frustrated = session_df[session_df["sentiment_label"] == "frustrado"]
         session_update: dict[str, Any] = {
+            "id": session_id,
             "has_escalation": bool(session_df["escalation"].any()),
             "has_abandonment": bool(session_df["abandonment_risk"].any()),
         }
@@ -320,9 +379,16 @@ async def _persist_sentiment_to_db(df: pd.DataFrame) -> None:
             if len(scores) > 0:
                 session_update["avg_frustration_score"] = round(float(scores.mean()), 3)
                 session_update["max_frustration_score"] = round(float(scores.max()), 3)
-        sb.table("sessions").update(session_update).eq("id", session_id).execute()
+        session_rows.append(session_update)
 
-    log.info("db_sentiment_updated")
+    session_batch_size = 200
+    for i in range(0, len(session_rows), session_batch_size):
+        sb.table("sessions").upsert(
+            session_rows[i : i + session_batch_size],
+            on_conflict="id"
+        ).execute()
+
+    log.info("db_sentiment_updated", messages=len(message_rows), sessions=len(session_rows))
 
 
 # ── Top sesiones frustradas ──────────────────────────────────────────────────
@@ -355,8 +421,11 @@ def _generate_frustrated_sessions_csv(
     )
 
     # Agregar región de la sesión
-    session_region = df.groupby("session_id")["region"].first()
-    session_stats = session_stats.merge(session_region, on="session_id", how="left")
+    if "region" in df.columns:
+        session_region = df.groupby("session_id")["region"].first()
+        session_stats = session_stats.merge(session_region, on="session_id", how="left")
+    else:
+        session_stats["region"] = None
 
     session_stats = (
         session_stats.sort_values("avg_frustration_score", ascending=False)

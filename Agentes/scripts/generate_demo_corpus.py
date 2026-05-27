@@ -1,57 +1,81 @@
 """
 Generador de corpus sintético de demo para ConversaAI.
 
-Genera un CSV con ~500 sesiones realistas en ES/PT para validar
-el pipeline end-to-end sin depender del corpus real del cliente.
+Genera un CSV con el formato REAL del pipeline:
+  session_id, usuario, fecha, region, intencion,
+  nivel_frustracion, texto_espanol, texto_portugues, es_churn_risk
 
-Uso: python scripts/generate_demo_corpus.py
+Por defecto genera ~2 000 mensajes (~500 sesiones × 4 turnos prom.).
+Suficiente para métricas completas en ~40 min con Groq free tier.
+
+Uso:
+  python scripts/generate_demo_corpus.py             # ~2 000 msgs
+  python scripts/generate_demo_corpus.py --size 500  # demo rápido
+  python scripts/generate_demo_corpus.py --size 2000 --out data/raw/demo_corpus.csv
 """
+from __future__ import annotations
+
+import argparse
 import csv
 import random
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# Seed fijo para reproducibilidad
 random.seed(42)
 
-# ── Templates de conversación ────────────────────────────────────────────────
+# ── Regiones ─────────────────────────────────────────────────────────────────
 
-INTENTS_ES = {
+REGIONS = ["LATAM", "LATAM", "LATAM", "BRAZIL"]
+
+USERS_ES = [
+    "carlos_m", "ana_garcia", "pedro_lopez", "lucia_ramos", "juan_diaz",
+    "maria_torres", "roberto_v", "sofia_h", "diego_p", "valentina_r",
+    "miguel_a", "camila_s", "andres_b", "paula_c", "fernando_g",
+]
+
+USERS_PT = [
+    "joao_silva", "maria_costa", "pedro_oliveira", "ana_santos", "lucas_f",
+    "juliana_p", "carlos_r", "beatriz_m", "rafael_n", "leticia_a",
+]
+
+# ── Textos en español por intención ─────────────────────────────────────────
+
+TEXT_ES: dict[str, dict[str, list[str]]] = {
     "consulta_saldo": {
         "user": [
             "quiero saber mi saldo",
             "cuánto debo este mes",
             "cuál es mi saldo actual",
-            "me pueden decir cuánto tengo",
-            "necesito ver mi balance",
+            "me pueden decir cuánto tengo pendiente",
+            "necesito ver mi balance de cuenta",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Tu saldo es $150.00. Listo, ¿algo más?",
             "Tu saldo actual es de $234.56. Resuelto.",
             "El balance de tu cuenta es $89.00. Confirmado.",
         ],
-        "bot_unresolved": [
+        "unresolved": [
             "¿Puedes darme tu número de cuenta?",
-            "Necesito verificar tu identidad primero",
-            "Un momento, estoy consultando",
+            "Necesito verificar tu identidad primero.",
+            "Un momento, estoy consultando el sistema.",
         ],
     },
     "reporte_problema": {
         "user": [
-            "no funciona la app",
+            "no funciona la aplicación",
             "la app no carga desde hace 3 días",
             "no puedo entrar a mi cuenta",
             "da error al iniciar sesión",
             "la página se queda en blanco",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Ya identificamos el problema, se solucionó. Listo.",
-            "Hemos reiniciado tu sesión, debería funcionar. Caso TICKET-{ticket} abierto.",
+            "Hemos reiniciado tu sesión. TICKET-{t} abierto. Resuelto.",
             "El error fue corregido, ya puedes ingresar. Confirmado.",
         ],
-        "bot_unresolved": [
-            "¿Probó reiniciar la app?",
-            "Entiendo, voy a revisar",
+        "unresolved": [
+            "¿Probó reiniciar la aplicación?",
+            "Entiendo, voy a revisar el sistema.",
             "¿Puede describir el error con más detalle?",
         ],
     },
@@ -61,170 +85,179 @@ INTENTS_ES = {
             "quiero mi dinero de vuelta",
             "hay un cargo que no reconozco",
             "me cobraron doble",
-            "necesito que devuelvan el cobro",
+            "necesito que devuelvan el cobro erróneo",
         ],
-        "bot_resolved": [
-            "Reembolso procesado por $50.00. TICKET-{ticket} generado.",
-            "Ya se aplicó la devolución a tu cuenta. Listo.",
-            "El cargo fue revertido. Confirmado.",
+        "resolved": [
+            "Reembolso procesado por $50.00. TICKET-{t} generado. Listo.",
+            "Ya se aplicó la devolución a tu cuenta. Confirmado.",
+            "El cargo fue revertido exitosamente. Resuelto.",
         ],
-        "bot_unresolved": [
-            "Necesito el número de referencia del cobro",
-            "Voy a escalar esto al área de finanzas",
-            "¿Puede enviar captura del cargo?",
+        "unresolved": [
+            "Necesito el número de referencia del cobro.",
+            "Voy a escalar esto al área de finanzas.",
+            "¿Puede enviar captura del cargo no reconocido?",
         ],
     },
     "cambio_datos": {
         "user": [
-            "quiero cambiar mi teléfono",
-            "necesito actualizar mi correo",
+            "quiero cambiar mi teléfono de contacto",
+            "necesito actualizar mi correo electrónico",
             "cambiar dirección de facturación",
             "actualizar mis datos personales",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Datos actualizados correctamente. Listo.",
-            "Tu teléfono fue cambiado. Confirmado.",
+            "Tu teléfono fue cambiado sin problemas. Confirmado.",
             "Correo actualizado exitosamente. Resuelto.",
         ],
-        "bot_unresolved": [
-            "¿Cuál es el nuevo dato?",
-            "Necesito verificar tu identidad",
-            "¿Me puede dar su nombre completo?",
+        "unresolved": [
+            "¿Cuál es el nuevo dato a actualizar?",
+            "Necesito verificar tu identidad primero.",
+            "¿Me puede dar su nombre completo para continuar?",
         ],
     },
     "consulta_estado": {
         "user": [
             "dónde está mi pedido",
             "cuál es el estado de mi reclamo",
-            "qué pasó con mi ticket",
+            "qué pasó con mi ticket abierto",
             "hace 5 días hice un pedido y no llega",
         ],
-        "bot_resolved": [
-            "Tu pedido llega mañana. Número de seguimiento: TR-{ticket}. Listo.",
-            "Tu reclamo fue procesado. CASO-{ticket} asignado.",
+        "resolved": [
+            "Tu pedido llega mañana. Seguimiento: TR-{t}. Listo.",
+            "Tu reclamo fue procesado. CASO-{t} asignado. Resuelto.",
             "El ticket fue resuelto ayer. Confirmado.",
         ],
-        "bot_unresolved": [
-            "¿Tiene el número de pedido?",
-            "Estoy verificando en el sistema",
-            "No encuentro ese pedido, ¿puede verificar?",
+        "unresolved": [
+            "¿Tiene el número de pedido o reclamo?",
+            "Estoy verificando en el sistema, un momento.",
+            "No encuentro ese pedido, ¿puede verificar el número?",
         ],
     },
     "queja_servicio": {
         "user": [
             "el servicio es pésimo",
-            "quiero hablar con un humano",
-            "estoy harto de este bot",
+            "quiero hablar con un humano ahora",
+            "estoy harto de este chatbot que no ayuda",
             "qué mal servicio, esto no debería ser así",
-            "llevo horas esperando respuesta",
+            "llevo horas esperando respuesta y nada",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Lamento la experiencia. Te transfiero a un agente humano. Listo.",
-            "Entiendo tu frustración. Escalé tu caso con prioridad. TICKET-{ticket}.",
+            "Entiendo tu frustración. Escalé tu caso con prioridad. TICKET-{t}.",
         ],
-        "bot_unresolved": [
-            "Entiendo, ¿puedo ayudarte con algo más?",
-            "Lamento el inconveniente",
-            "¿Puede ser más específico con el problema?",
+        "unresolved": [
+            "Entiendo, ¿puedo ayudarte con algo específico?",
+            "Lamento el inconveniente causado.",
+            "¿Puede ser más específico con el problema que tuvo?",
         ],
     },
     "solicitud_info": {
         "user": [
             "cómo funciona el plan premium",
-            "qué incluye la suscripción",
-            "cuáles son los horarios de atención",
-            "necesito información sobre los planes",
+            "qué incluye la suscripción mensual",
+            "cuáles son los horarios de atención al cliente",
+            "necesito información sobre los planes disponibles",
         ],
-        "bot_resolved": [
-            "El plan premium incluye X, Y y Z. ¿Algo más? Listo.",
-            "Nuestro horario es de 8 a 20h. Resuelto.",
-            "Aquí está la info: https://example.com/planes. Confirmado.",
+        "resolved": [
+            "El plan premium incluye acceso ilimitado, soporte 24/7 y más. Listo.",
+            "Nuestro horario de atención es de 8 a 20h de lunes a viernes. Resuelto.",
+            "Aquí está la información completa: https://example.com/planes. Confirmado.",
         ],
-        "bot_unresolved": [
-            "¿Qué plan le interesa?",
-            "Un momento, estoy buscando esa información",
-            "¿Puede ser más específico?",
+        "unresolved": [
+            "¿Qué plan le interesa en particular?",
+            "Un momento, estoy buscando esa información.",
+            "¿Puede ser más específico sobre lo que necesita saber?",
         ],
     },
     "cancelacion": {
         "user": [
             "quiero cancelar mi suscripción",
-            "dar de baja mi cuenta",
-            "cancelar el servicio",
-            "no quiero seguir con el plan",
+            "dar de baja mi cuenta definitivamente",
+            "cancelar el servicio que contraté",
+            "no quiero seguir con este plan",
         ],
-        "bot_resolved": [
-            "Cancelación procesada. Listo, lamentamos que te vayas.",
-            "Tu suscripción fue cancelada. Confirmado.",
+        "resolved": [
+            "Cancelación procesada. Lamentamos que te vayas. Listo.",
+            "Tu suscripción fue cancelada exitosamente. Confirmado.",
         ],
-        "bot_unresolved": [
-            "¿Estás seguro? Tenemos una oferta especial",
+        "unresolved": [
+            "¿Estás seguro? Tenemos una oferta especial para retenerte.",
             "¿Puedo saber el motivo de la cancelación?",
-            "Antes de cancelar, ¿puedo ofrecerte un descuento?",
+            "Antes de cancelar, ¿puedo ofrecerte un descuento del 30%?",
+        ],
+    },
+    "logistica_envio": {
+        "user": [
+            "mi paquete no llegó en la fecha indicada",
+            "el repartidor no pasó por mi domicilio",
+            "el envío lleva 5 días de retraso",
+            "dónde está mi paquete, ya pasó la fecha de entrega",
+            "el courier no me encontró y no dejó ningún aviso",
+        ],
+        "resolved": [
+            "Reprogramamos la entrega para mañana. TICKET-{t} generado. Listo.",
+            "El paquete fue reagendado con el courier. Resuelto.",
+        ],
+        "unresolved": [
+            "¿Tiene el número de seguimiento del envío?",
+            "Estoy consultando con el courier asignado.",
+            "El sistema muestra que fue entregado, ¿revisó con vecinos?",
+        ],
+    },
+    "problema_pago": {
+        "user": [
+            "me cobraron dos veces el mismo concepto",
+            "hay un cargo duplicado en mi tarjeta de crédito",
+            "el pago no se procesó pero me descontaron el dinero",
+            "pagué pero el sistema dice que tengo deuda pendiente",
+            "no reconozco este cobro reciente en mi cuenta",
+        ],
+        "resolved": [
+            "El cargo duplicado fue revertido. TICKET-{t}. Listo.",
+            "Confirmamos tu pago. El sistema fue actualizado. Resuelto.",
+        ],
+        "unresolved": [
+            "¿Puede enviar captura del estado de cuenta?",
+            "Necesito el número de referencia de la transacción.",
+            "Voy a escalar este caso al área de pagos.",
         ],
     },
 }
 
-INTENTS_PT = {
+# ── Textos en portugués (subconjunto para BRAZIL) ────────────────────────────
+
+TEXT_PT: dict[str, dict[str, list[str]]] = {
     "consulta_saldo": {
         "user": [
             "quero saber meu saldo",
             "quanto devo este mês",
             "qual é meu saldo atual",
-            "preciso ver meu balanço",
+            "preciso ver meu balanço de conta",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Seu saldo é R$150.00. Pronto, algo mais?",
             "O saldo da sua conta é R$234.56. Feito.",
         ],
-        "bot_unresolved": [
+        "unresolved": [
             "Pode me dar seu número de conta?",
-            "Preciso verificar sua identidade primeiro",
+            "Preciso verificar sua identidade primeiro.",
         ],
     },
     "reporte_problema": {
         "user": [
-            "o app não funciona",
+            "o app não funciona de jeito nenhum",
             "não consigo entrar na minha conta",
-            "dá erro ao fazer login",
-            "a página fica em branco há 3 dias",
+            "dá erro ao fazer login há 3 dias",
+            "a página fica em branco",
         ],
-        "bot_resolved": [
+        "resolved": [
             "Já identificamos o problema, foi solucionado. Pronto.",
-            "Reiniciamos sua sessão. TICKET-{ticket} aberto.",
+            "Reiniciamos sua sessão. TICKET-{t} aberto. Resolvido.",
         ],
-        "bot_unresolved": [
-            "Tentou reiniciar o app?",
-            "Entendo, vou verificar",
-        ],
-    },
-    "queja_servicio": {
-        "user": [
-            "péssimo atendimento",
-            "quero falar com um humano",
-            "que absurdo, não resolvem nada",
-            "já faz horas que espero",
-        ],
-        "bot_resolved": [
-            "Lamento a experiência. Vou transferir para um atendente. Pronto.",
-        ],
-        "bot_unresolved": [
-            "Entendo, posso ajudar com algo mais?",
-            "Lamento o inconveniente",
-        ],
-    },
-    "cancelacion": {
-        "user": [
-            "quero cancelar minha assinatura",
-            "cancelar o serviço",
-            "não quero mais o plano",
-        ],
-        "bot_resolved": [
-            "Cancelamento processado. Feito.",
-        ],
-        "bot_unresolved": [
-            "Tem certeza? Temos uma oferta especial",
-            "Posso saber o motivo?",
+        "unresolved": [
+            "Tentou reiniciar o aplicativo?",
+            "Entendo, vou verificar no sistema.",
         ],
     },
     "solicitud_reembolso": {
@@ -232,361 +265,313 @@ INTENTS_PT = {
             "cobraram errado, quero reembolso",
             "quero meu dinheiro de volta",
             "tem uma cobrança que não reconheço",
+            "cobraram duas vezes o mesmo valor",
         ],
-        "bot_resolved": [
-            "Reembolso processado. TICKET-{ticket} gerado. Pronto.",
+        "resolved": [
+            "Reembolso processado. TICKET-{t} gerado. Pronto.",
+            "A devolução foi aplicada à sua conta. Feito.",
         ],
-        "bot_unresolved": [
-            "Preciso do número de referência",
-            "Vou escalar para a área financeira",
+        "unresolved": [
+            "Preciso do número de referência da cobrança.",
+            "Vou escalar para a área financeira.",
+        ],
+    },
+    "queja_servicio": {
+        "user": [
+            "péssimo atendimento, não resolve nada",
+            "quero falar com um humano agora",
+            "que absurdo, ninguém me ajuda",
+            "já faz horas que espero uma resposta",
+        ],
+        "resolved": [
+            "Lamento a experiência. Vou transferir para um atendente. Pronto.",
+        ],
+        "unresolved": [
+            "Entendo, posso ajudar com algo mais específico?",
+            "Lamento o inconveniente causado.",
+        ],
+    },
+    "cancelacion": {
+        "user": [
+            "quero cancelar minha assinatura",
+            "cancelar o serviço contratado",
+            "não quero mais esse plano",
+        ],
+        "resolved": [
+            "Cancelamento processado com sucesso. Feito.",
+        ],
+        "unresolved": [
+            "Tem certeza? Temos uma oferta especial para você.",
+            "Posso saber o motivo do cancelamento?",
+        ],
+    },
+    "logistica_envio": {
+        "user": [
+            "meu pacote não chegou na data prevista",
+            "o entregador não passou pela minha casa",
+            "o envio está 5 dias atrasado",
+            "onde está meu pedido, já passou da data",
+        ],
+        "resolved": [
+            "Reagendamos a entrega para amanhã. TICKET-{t}. Pronto.",
+        ],
+        "unresolved": [
+            "Tem o número de rastreamento do envio?",
+            "Estou consultando com a transportadora.",
+        ],
+    },
+    "problema_pago": {
+        "user": [
+            "cobraram duas vezes o mesmo valor",
+            "há uma cobrança duplicada no meu cartão",
+            "paguei mas o sistema diz que tenho dívida",
+        ],
+        "resolved": [
+            "A cobrança duplicada foi estornada. TICKET-{t}. Pronto.",
+        ],
+        "unresolved": [
+            "Pode enviar print do extrato bancário?",
+            "Preciso do número de referência da transação.",
         ],
     },
 }
 
-FRUSTRATION_ESCALATION_ES = [
-    "ya les dije, no funciona",
+# ── Frases de escalada ────────────────────────────────────────────────────────
+
+ESCALATION_ES = [
+    "ya les dije, no funciona y nadie resuelve",
     "CUÁNTAS VECES TENGO QUE REPETIR LO MISMO",
-    "esto es un robo 😤😡",
+    "esto es un robo, exijo mi dinero 😤😡",
     "PÉSIMO SERVICIO, NO SIRVEN PARA NADA 🤬",
-    "llevo 3 días esperando y nada!!!",
-    "no me entienden, qué mal servicio",
+    "llevo 3 días esperando y absolutamente nada!!!",
+    "no me entienden, qué mal servicio tienen",
     "ya chole, quiero hablar con un humano YA",
+    "voy a poner una queja formal, es inaceptable",
 ]
 
-FRUSTRATION_ESCALATION_PT = [
-    "já falei, não funciona",
-    "QUE ABSURDO, NINGUÉM RESOLVE NADA",
+ESCALATION_PT = [
+    "já falei várias vezes, não funciona",
+    "QUE ABSURDO, NINGUÉM RESOLVE NADA AQUI",
     "péssimo atendimento 😤😡",
     "HORRÍVEL, NÃO SERVEM PARA NADA 🤬",
-    "já faz 3 dias e nada!!!",
+    "já faz 3 dias e absolutamente nada!!!",
     "vocês me enganaram, isso é fraude",
+    "vou registrar uma reclamação formal",
 ]
 
-# Ruido realista
-NOISE_TEMPLATES = [
-    "[12:34] ",
-    "[15:22:01] ",
-    " #SES-{sid}",
-    " <br>&nbsp;",
-    " visita https://example.com/help",
-    " 😊👍",
-    "",  # sin ruido
-    "",
-    "",
-    "",  # peso hacia sin ruido
-]
-
-# ── Tipos de sesión ──────────────────────────────────────────────────────────
+# ── Tipos de sesión y su distribución ────────────────────────────────────────
 
 SESSION_TYPES = {
-    "satisfecha": 0.35,      # 35% sesiones satisfechas
-    "neutra": 0.25,          # 25% neutras (resueltas sin emoción)
-    "frustrada_resuelta": 0.15,  # 15% frustrantes pero resueltas
-    "frustrada_escalada": 0.12,  # 12% con escalada
-    "abandono": 0.08,        # 8% abandono
-    "multi_intent": 0.05,    # 5% múltiples intenciones
+    "satisfecha": 0.30,
+    "neutra": 0.25,
+    "frustrada_resuelta": 0.18,
+    "frustrada_escalada": 0.14,
+    "abandono": 0.08,
+    "multi_intent": 0.05,
 }
 
 
-def _add_noise(text: str, session_id: str) -> str:
-    """Agrega ruido realista a un mensaje."""
-    noise = random.choice(NOISE_TEMPLATES)
-    noise = noise.replace("{sid}", session_id.split("-")[1] if "-" in session_id else "000")
-    return noise + text if noise.startswith("[") else text + noise
-
-
-def _generate_timestamp(base: datetime, turn: int) -> str:
-    """Genera timestamp incrementando ~30s por turno."""
-    delta = timedelta(seconds=turn * random.randint(20, 90))
+def _ts(base: datetime, turn: int) -> str:
+    delta = timedelta(seconds=turn * random.randint(25, 100))
     return (base + delta).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _pick_speaker_variant() -> str:
-    """Varía el nombre del speaker para probar el mapeo del ETL."""
-    return random.choice(["bot", "bot", "bot", "system", "agent"])
+def _nivel(session_type: str, turn_index: int, total_turns: int) -> int:
+    if session_type in ("frustrada_escalada", "abandono"):
+        if turn_index >= total_turns // 2:
+            return 2
+        return 1
+    if session_type == "frustrada_resuelta":
+        return 1
+    if session_type == "satisfecha":
+        return 0
+    return random.choice([0, 0, 1])
+
+
+def _churn(session_type: str) -> bool:
+    return session_type in ("frustrada_escalada", "abandono") and random.random() < 0.7
 
 
 def generate_session(
-    session_id: str,
+    session_num: int,
     session_type: str,
-    lang: str,
+    region: str,
     base_time: datetime,
 ) -> list[dict]:
-    """Genera una sesión completa según el tipo."""
-    intents = INTENTS_ES if lang == "es" else INTENTS_PT
-    escalation_phrases = (
-        FRUSTRATION_ESCALATION_ES if lang == "es" else FRUSTRATION_ESCALATION_PT
-    )
+    lang = "pt" if region == "BRAZIL" else "es"
+    texts = TEXT_ES if lang == "es" else TEXT_PT
+    escalation = ESCALATION_ES if lang == "es" else ESCALATION_PT
+    users = USERS_PT if region == "BRAZIL" else USERS_ES
 
-    # Elegir intent principal
-    available_intents = list(intents.keys())
-    intent_key = random.choice(available_intents)
-    intent_data = intents[intent_key]
+    session_id = f"SES-{session_num:05d}"
+    usuario = random.choice(users)
+    intent_key = random.choice(list(texts.keys()))
+    idata = texts[intent_key]
 
     rows: list[dict] = []
-    turn = 0
+
+    def msg(turn: int, text_es: str, text_pt: str, intent: str, nivel: int, churn: bool) -> dict:
+        return {
+            "session_id": session_id,
+            "usuario": usuario,
+            "fecha": _ts(base_time, turn),
+            "region": region,
+            "intencion": intent,
+            "nivel_frustracion": nivel,
+            "texto_espanol": text_es,
+            "texto_portugues": text_pt,
+            "es_churn_risk": churn,
+        }
+
+    def bilingual(es_pool: list[str], pt_pool: list[str]) -> tuple[str, str]:
+        es = random.choice(es_pool)
+        pt = random.choice(pt_pool) if pt_pool else ""
+        return es, pt
+
+    def ticket() -> str:
+        return str(random.randint(10000, 99999))
+
+    # Texto usuario en ambos idiomas (para todas las regiones)
+    user_es = TEXT_ES.get(intent_key, TEXT_ES["reporte_problema"])["user"]
+    user_pt_src = TEXT_PT.get(intent_key, {}).get("user", user_es)
+    res_es = TEXT_ES.get(intent_key, TEXT_ES["reporte_problema"])["resolved"]
+    unres_es = TEXT_ES.get(intent_key, TEXT_ES["reporte_problema"])["unresolved"]
+    res_pt = TEXT_PT.get(intent_key, {}).get("resolved", res_es)
+    unres_pt = TEXT_PT.get(intent_key, {}).get("unresolved", unres_es)
+    esc_es = random.choice(ESCALATION_ES)
+    esc_pt = random.choice(ESCALATION_PT)
 
     if session_type == "satisfecha":
-        # User pregunta → bot resuelve → user agradece
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_resolved"]).replace(
-                "{ticket}", str(random.randint(10000, 99999))
-            ),
-        })
-        turn += 1
-        thanks = (
-            random.choice(["gracias, perfecto", "genial, gracias", "excelente, funcionó"])
-            if lang == "es"
-            else random.choice(["obrigado, funcionou", "ótimo, resolvido", "perfeito"])
-        )
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": thanks,
-        })
+        turn_texts = [
+            (random.choice(user_es), random.choice(user_pt_src), 0),
+            (random.choice(res_es).replace("{t}", ticket()), random.choice(res_pt).replace("{t}", ticket()), 0),
+            ("gracias, perfecto, quedé muy satisfecho", "obrigado, perfeito, fiquei satisfeito", 0),
+        ]
+        is_churn = False
 
     elif session_type == "neutra":
-        # User pregunta → bot pide info → user da info → bot resuelve
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        filler = "12345678" if lang == "es" else "12345678"
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": filler,
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_resolved"]).replace(
-                "{ticket}", str(random.randint(10000, 99999))
-            ),
-        })
+        turn_texts = [
+            (random.choice(user_es), random.choice(user_pt_src), 0),
+            (random.choice(unres_es), random.choice(unres_pt), 0),
+            ("mi número es 12345678", "meu número é 12345678", 0),
+            (random.choice(res_es).replace("{t}", ticket()), random.choice(res_pt).replace("{t}", ticket()), 0),
+        ]
+        is_churn = False
 
     elif session_type == "frustrada_resuelta":
-        # User → bot no resuelve → user se frustra → bot resuelve
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        # User se frustra
-        frustration = (
-            random.choice(["no me entiende, ya les dije", "esto ya me tiene harto"])
-            if lang == "es"
-            else random.choice(["vocês não entendem", "já falei isso"])
-        )
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(frustration, session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_resolved"]).replace(
-                "{ticket}", str(random.randint(10000, 99999))
-            ),
-        })
-        turn += 1
-        ok_msg = "ok gracias" if lang == "es" else "ok obrigado"
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": ok_msg,
-        })
+        turn_texts = [
+            (random.choice(user_es), random.choice(user_pt_src), 0),
+            (random.choice(unres_es), random.choice(unres_pt), 1),
+            ("no me entiende, ya les dije esto antes", "vocês não entendem, já falei isso", 1),
+            (random.choice(res_es).replace("{t}", ticket()), random.choice(res_pt).replace("{t}", ticket()), 1),
+            ("ok gracias, al final se resolvió", "ok obrigado, finalmente resolvido", 0),
+        ]
+        is_churn = False
 
     elif session_type == "frustrada_escalada":
-        # User → bot falla → user escala → bot falla → user explota
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        # Escalada
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(escalation_phrases), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": random.choice(escalation_phrases),
-        })
+        turn_texts = [
+            (random.choice(user_es), random.choice(user_pt_src), 0),
+            (random.choice(unres_es), random.choice(unres_pt), 1),
+            (random.choice(user_es), random.choice(user_pt_src), 1),
+            (random.choice(unres_es), random.choice(unres_pt), 1),
+            (esc_es, esc_pt, 2),
+            (random.choice(unres_es), random.choice(unres_pt), 2),
+            (random.choice(ESCALATION_ES), random.choice(ESCALATION_PT), 2),
+        ]
+        is_churn = random.random() < 0.7
 
     elif session_type == "abandono":
-        # User → bot no ayuda → user frustrado → NO responde más
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(random.choice(intent_data["user"]), session_id),
-        })
-        turn += 1
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
-        turn += 1
-        frustration = random.choice(escalation_phrases)
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": "user",
-            "text": _add_noise(frustration, session_id),
-        })
-        turn += 1
-        # Bot responde pero user ya se fue
-        rows.append({
-            "session_id": session_id,
-            "timestamp": _generate_timestamp(base_time, turn),
-            "speaker": _pick_speaker_variant(),
-            "text": random.choice(intent_data["bot_unresolved"]),
-        })
+        turn_texts = [
+            (random.choice(user_es), random.choice(user_pt_src), 0),
+            (random.choice(unres_es), random.choice(unres_pt), 1),
+            (esc_es, esc_pt, 2),
+            (random.choice(unres_es), random.choice(unres_pt), 2),
+        ]
+        is_churn = True
 
     elif session_type == "multi_intent":
-        # User hace varias preguntas en la misma sesión
-        intents_to_use = random.sample(available_intents, min(3, len(available_intents)))
-        for intent in intents_to_use:
-            idata = intents[intent]
-            rows.append({
-                "session_id": session_id,
-                "timestamp": _generate_timestamp(base_time, turn),
-                "speaker": "user",
-                "text": _add_noise(random.choice(idata["user"]), session_id),
-            })
-            turn += 1
+        intents_to_use = random.sample(list(TEXT_ES.keys()), min(3, len(TEXT_ES)))
+        turn_texts = []
+        for ik in intents_to_use:
+            u_es = random.choice(TEXT_ES[ik]["user"])
+            u_pt = random.choice(TEXT_PT.get(ik, {}).get("user", [u_es]))
+            turn_texts.append((u_es, u_pt, 0))
             resolved = random.random() > 0.4
-            bot_msgs = idata["bot_resolved"] if resolved else idata["bot_unresolved"]
-            rows.append({
-                "session_id": session_id,
-                "timestamp": _generate_timestamp(base_time, turn),
-                "speaker": _pick_speaker_variant(),
-                "text": random.choice(bot_msgs).replace(
-                    "{ticket}", str(random.randint(10000, 99999))
-                ),
-            })
-            turn += 1
+            if resolved:
+                b_es = random.choice(TEXT_ES[ik]["resolved"]).replace("{t}", ticket())
+                b_pt = random.choice(TEXT_PT.get(ik, {}).get("resolved", [b_es])).replace("{t}", ticket())
+            else:
+                b_es = random.choice(TEXT_ES[ik]["unresolved"])
+                b_pt = random.choice(TEXT_PT.get(ik, {}).get("unresolved", [b_es]))
+            turn_texts.append((b_es, b_pt, 0))
+        is_churn = False
+    else:
+        turn_texts = [(random.choice(user_es), random.choice(user_pt_src), 0)]
+        is_churn = False
+
+    for turn_i, (t_es, t_pt, nivel) in enumerate(turn_texts):
+        rows.append(msg(turn_i, t_es, t_pt, intent_key, nivel, is_churn))
 
     return rows
 
 
 def main() -> None:
-    """Genera el corpus de demo."""
-    output_dir = Path("data/raw")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "demo_corpus.csv"
+    parser = argparse.ArgumentParser(description="Generar corpus demo en formato real")
+    parser.add_argument(
+        "--size", type=int, default=2000,
+        help="Número aproximado de mensajes a generar (default: 2000)",
+    )
+    parser.add_argument(
+        "--out", type=str, default="data/raw/demo_corpus.csv",
+        help="Ruta de salida del CSV",
+    )
+    args = parser.parse_args()
+
+    output_path = Path(args.out)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ~4 turnos por sesión en promedio → sessions = size / 4
+    target_sessions = max(50, args.size // 4)
 
     all_rows: list[dict] = []
     session_num = 0
     base_date = datetime(2025, 4, 1, 8, 0, 0)
 
-    # Generar sesiones según distribución de tipos
-    total_sessions = 500
     for session_type, pct in SESSION_TYPES.items():
-        count = int(total_sessions * pct)
+        count = max(1, int(target_sessions * pct))
         for _ in range(count):
             session_num += 1
-            session_id = f"SES-{session_num:05d}"
-
-            # 70% ES, 30% PT
-            lang = "pt" if random.random() < 0.3 else "es"
-
-            # Timestamp base aleatorio dentro del mes
-            day_offset = random.randint(0, 29)
+            region = random.choice(REGIONS)
+            day_offset = random.randint(0, 59)
             hour_offset = random.randint(0, 14)
             session_time = base_date + timedelta(days=day_offset, hours=hour_offset)
-
-            rows = generate_session(session_id, session_type, lang, session_time)
+            rows = generate_session(session_num, session_type, region, session_time)
             all_rows.extend(rows)
 
-    # Shuffle para simular llegada no ordenada
-    random.shuffle(all_rows)
+    FIELDNAMES = [
+        "session_id", "usuario", "fecha", "region", "intencion",
+        "nivel_frustracion", "texto_espanol", "texto_portugues", "es_churn_risk",
+    ]
 
-    # Escribir CSV
     with open(output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["session_id", "timestamp", "speaker", "text"])
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(all_rows)
 
-    print(f"✅ Corpus generado: {output_path}")
-    print(f"   Sesiones: {session_num}")
-    print(f"   Mensajes: {len(all_rows)}")
+    sessions = len({r["session_id"] for r in all_rows})
+    regions_count = {}
+    for r in all_rows:
+        regions_count[r["region"]] = regions_count.get(r["region"], 0) + 1
+
+    print(f"Corpus generado: {output_path}")
+    print(f"  Mensajes  : {len(all_rows)}")
+    print(f"  Sesiones  : {sessions}")
+    print(f"  Por region: {regions_count}")
+    intents_count: dict[str, int] = {}
+    for r in all_rows:
+        intents_count[r["intencion"]] = intents_count.get(r["intencion"], 0) + 1
+    for k, v in sorted(intents_count.items(), key=lambda x: -x[1]):
+        print(f"    {k}: {v}")
 
 
 if __name__ == "__main__":

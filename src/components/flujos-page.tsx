@@ -13,6 +13,9 @@ function FlowsTable({ flows }: { flows: FlowTableItem[] }) {
 
   const card: React.CSSProperties = {
     backgroundColor: colors.card,
+    backdropFilter: "blur(12px)",
+    WebkitBackdropFilter: "blur(12px)",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)",
     borderRadius: 12,
     border: `1px solid ${colors.border}`,
     padding: 24,

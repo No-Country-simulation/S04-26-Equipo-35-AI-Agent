@@ -1,38 +1,78 @@
+"use client";
+
 import Link from "next/link";
+import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { DashboardShell } from "./dashboard-shell";
 import { Sidebar } from "./sidebar";
-import { AlertCircle, Flag } from "lucide-react";
+import { AlertCircle, Flag, Info, Loader2, Database, History, RefreshCw } from "lucide-react";
 import { useTheme } from "../context/theme-context";
+import {
+  formatIntentLabel,
+  type ModelMetricsData,
+  type RegionMetrics,
+} from "@src/lib/model-metrics-types";
 
-// ─── Alert Banner ─────────────────────────────────────────────────────────────
-function AlertBanner() {
+type LangFilter = "ALL" | "ES" | "PT";
+
+function pct(v: number | null | undefined): string {
+  if (v == null) return "—";
+  return v.toFixed(3);
+}
+
+function deltaStr(v: number | null | undefined): string {
+  if (v == null) return "—";
+  const sign = v >= 0 ? "+" : "";
+  return `${sign}${v.toFixed(3)}`;
+}
+
+function regionForFilter(
+  byRegion: Record<string, RegionMetrics> | undefined,
+  filter: LangFilter
+): RegionMetrics | null {
+  if (!byRegion) return null;
+  if (filter === "ES") return byRegion.LATAM ?? null;
+  if (filter === "PT") return byRegion.BRAZIL ?? null;
+  return byRegion.ALL ?? null;
+}
+
+export function ModelMetricsPage({ data }: { data: ModelMetricsData }) {
   const { colors, isDark } = useTheme();
+  const router = useRouter();
+  const [lang, setLang] = useState<LangFilter>("ALL");
+  const [isEvaluating, setIsEvaluating] = useState(false);
+  const [evaluationMessage, setEvaluationMessage] = useState("");
+  const report = data.report;
 
-  return (
-    <div
-      style={{
-        backgroundColor: isDark ? "rgba(245,166,35,0.08)" : "rgba(232,146,10,0.08)",
-        border: `1px solid ${colors.warning}`,
-        borderRadius: 8,
-        padding: "10px 14px",
-        display: "flex",
-        alignItems: "flex-start",
-        gap: 10,
-      }}
-    >
-      <AlertCircle size={16} color={colors.warning} style={{ flexShrink: 0, marginTop: 2 }} />
-      <div style={{ color: colors.warning, fontSize: 12, lineHeight: 1.5 }}>
-        <span style={{ fontWeight: 600 }}>Alerta de degradación:</span> El modelo de sentimiento
-        (PT) bajó 6.2% en F1 respecto al mes anterior — supera el umbral del 5%. Se recomienda
-        revisar el corpus de entrenamiento o reentrenar.
-      </div>
-    </div>
+  const handleRecalculate = async () => {
+    setIsEvaluating(true);
+    setEvaluationMessage("Iniciando evaluación...");
+    try {
+      const res = await fetch("/api/pipeline/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ corpus: report?.corpus_path || "data/raw/data_conversa_ai.csv" }),
+      });
+      const resData = await res.json();
+      if (resData.ok) {
+        setEvaluationMessage("Ejecutando evaluación en la base de datos... Recargando en breve...");
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        router.refresh();
+      } else {
+        alert("Error al iniciar la evaluación: " + (resData.error || "desconocido"));
+      }
+    } catch (e) {
+      alert("Error de conexión: " + (e instanceof Error ? e.message : String(e)));
+    } finally {
+      setIsEvaluating(false);
+      setEvaluationMessage("");
+    }
+  };
+
+  const region = useMemo(
+    () => regionForFilter(report?.by_region, lang),
+    [report?.by_region, lang]
   );
-}
-
-// ─── Global Metrics Card ──────────────────────────────────────────────────────
-function GlobalMetricsCard() {
-  const { colors } = useTheme();
 
   const card: React.CSSProperties = {
     backgroundColor: colors.card,
@@ -41,450 +81,517 @@ function GlobalMetricsCard() {
     padding: 24,
   };
 
-  const tabs = ["Todos", "ES", "PT"];
+  const intentRows = useMemo(() => {
+    if (!report?.per_intent_accuracy) return [];
+    return Object.entries(report.per_intent_accuracy)
+      .map(([intent, stats]) => ({
+        intent: formatIntentLabel(intent),
+        actual: stats.accuracy,
+        n: stats.n,
+      }))
+      .sort((a, b) => a.actual - b.actual);
+  }, [report?.per_intent_accuracy]);
 
-  const metrics = [
-    {
-      label: "F1 Score Sentimiento",
-      value: "0.847",
-      delta: "+0.012",
-      deltaColor: "#00C49A",
-      deltaBg: "rgba(0,196,154,0.13)",
-      previous: "0.835",
-      isDegraded: false,
-    },
-    {
-      label: "F1 Score Intención",
-      value: "0.791",
-      delta: "−0.023",
-      deltaColor: "#F5A623",
-      deltaBg: "rgba(245,166,35,0.13)",
-      previous: "0.814",
-      isDegraded: false,
-    },
-    {
-      label: "F1 Score Sentimiento PT",
-      value: "0.762",
-      delta: "−0.062 ⚑",
-      deltaColor: "#FF6B6B",
-      deltaBg: "rgba(255,107,107,0.13)",
-      previous: "0.824 · umbral: −5%",
-      isDegraded: true,
-    },
-  ];
+  const breakdown = report?.sentiment_breakdown?.[lang === "PT" ? "PT" : "ES"];
 
   return (
-    <div style={card}>
-      <div
-        className="flex items-center justify-between"
-        style={{ marginBottom: 20 }}
-      >
-        <div
-          style={{
-            color: colors.textSecondary,
-            fontSize: 11,
-            textTransform: "uppercase",
-            letterSpacing: "0.05em",
-          }}
-        >
-          Métricas globales por idioma
-        </div>
-
-        {/* Language tabs */}
-        <div className="flex gap-2">
-          {tabs.map((tab, i) => (
-            <button
-              key={tab}
-              style={{
-                fontSize: 11,
-                padding: "4px 12px",
-                borderRadius: 20,
-                cursor: "pointer",
-                backgroundColor: i === 0 ? "rgba(223,245,239,0.06)" : "transparent",
-                color: i === 0 ? colors.accent : colors.textSecondary,
-                border: i === 0 ? `1px solid ${colors.accent}` : `1px solid ${colors.textSecondary}`,
-              }}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Metrics grid */}
-      <div className="grid grid-cols-3 gap-4">
-        {metrics.map((m) => (
-          <div
-            key={m.label}
-            style={{
-              backgroundColor: m.isDegraded ? "rgba(255,107,107,0.03)" : colors.background,
-              borderRadius: 8,
-              padding: 12,
-              border: m.isDegraded ? "1px solid #FF6B6B" : "none",
-            }}
-          >
-            <div style={{ color: colors.textSecondary, fontSize: 11, marginBottom: 8 }}>
-              {m.label}
-            </div>
-            <div
-              style={{
-                color: m.isDegraded ? "#FF6B6B" : "#FFFFFF",
-                fontSize: 24,
-                fontWeight: 600,
-                marginBottom: 8,
-              }}
-            >
-              {m.value}
-            </div>
-            <div
-              style={{
-                display: "inline-block",
-                backgroundColor: m.deltaBg,
-                color: m.deltaColor,
-                fontSize: 11,
-                fontWeight: 500,
-                padding: "2px 8px",
-                borderRadius: 4,
-                marginBottom: 8,
-              }}
-            >
-              {m.delta}
-            </div>
-            <div style={{ color: colors.textSecondary, fontSize: 11 }}>
-              Anterior: {m.previous}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Accuracy Table Card ──────────────────────────────────────────────────────
-function AccuracyTableCard() {
-  const { colors } = useTheme();
-
-  const card: React.CSSProperties = {
-    backgroundColor: colors.card,
-    borderRadius: 12,
-    border: `1px solid ${colors.border}`,
-    padding: 24,
-  };
-
-  const rows = [
-    { intent: "Cancelar suscripción", actual: 0.91, previous: 0.89, delta: +0.02 },
-    { intent: "Reembolso parcial", actual: 0.83, previous: 0.87, delta: -0.04 },
-    { intent: "Soporte técnico", actual: 0.79, previous: 0.81, delta: -0.02 },
-    { intent: "Cambio de plan", actual: 0.88, previous: 0.86, delta: +0.02 },
-    { intent: "Error de pago", actual: 0.72, previous: 0.8, delta: -0.08, isCritical: true },
-    { intent: "Portabilidad datos", actual: 0.65, previous: 0.67, delta: -0.02 },
-  ];
-
-  return (
-    <div style={card}>
-      <div
-        style={{
-          color: colors.textSecondary,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: "0.05em",
-          marginBottom: 16,
-        }}
-      >
-        Accuracy por clase de intención
-      </div>
+    <DashboardShell sidebar={<Sidebar activeItem="Métricas modelo" />} mainClassName="space-y-6">
+      <nav className="flex items-center gap-1" style={{ fontSize: 13 }}>
+        <Link href="/" style={{ color: colors.textSecondary, textDecoration: "none" }}>
+          Dashboard
+        </Link>
+        <span style={{ color: colors.textSecondary, margin: "0 6px" }}>›</span>
+        <span style={{ color: colors.textPrimary }}>Calidad del clasificador LLM</span>
+      </nav>
 
       <div>
-        {/* Header */}
+        <h1 style={{ color: colors.textPrimary, fontSize: 22, fontWeight: 700, margin: 0 }}>
+          Calidad de los datos (validación PM)
+        </h1>
+        <p style={{ color: colors.textSecondary, fontSize: 13, margin: "4px 0 0 0" }}>
+          <strong>Para el equipo de Producto:</strong> Antes de confiar en las métricas del dashboard,
+          verifica qué tan bien el LLM clasifica sentimientos e intenciones comparado con datos validados.
+          Si el acuerdo es &lt;70%, los insights pueden estar sesgados.
+          {report?.evaluated_at && (
+            <> · Última evaluación: {new Date(report.evaluated_at).toLocaleString("es")}</>
+          )}
+          {data.totalMessages > 0 && <> · {data.totalMessages.toLocaleString()} mensajes en DB</>}
+        </p>
+      </div>
+
+      {evaluationMessage && (
         <div
-          className="grid grid-cols-4 gap-4"
+          role="status"
           style={{
-            padding: "8px 12px",
-            borderBottom: `1px solid ${colors.border}`,
-            marginBottom: 4,
+            borderRadius: 8,
+            padding: "10px 14px",
+            fontSize: 12,
+            border: `1px solid ${colors.accent}`,
+            background: isDark ? "rgba(0,196,154,0.08)" : "rgba(0,168,130,0.06)",
+            color: colors.textPrimary,
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
           }}
         >
-          <div style={{ color: colors.textSecondary, fontSize: 11 }}>Intención</div>
-          <div style={{ color: colors.textSecondary, fontSize: 11, textAlign: "right" }}>Actual</div>
-          <div style={{ color: colors.textSecondary, fontSize: 11, textAlign: "right" }}>Anterior</div>
-          <div style={{ color: colors.textSecondary, fontSize: 11, textAlign: "right" }}>Delta</div>
+          <Loader2 size={16} className="animate-spin" style={{ color: colors.accent }} />
+          <span>{evaluationMessage}</span>
         </div>
+      )}
 
-        {/* Rows */}
-        {rows.map((row, i) => (
-          <div
-            key={row.intent}
-            className="grid grid-cols-4 gap-4"
-            style={{
-              padding: "10px 12px",
-              backgroundColor: i % 2 === 0 ? colors.card : colors.background,
-              borderRadius: 4,
-            }}
-          >
-            <div style={{ color: colors.textPrimary, fontSize: 12 }}>{row.intent}</div>
-            <div style={{ color: colors.textPrimary, fontSize: 12, textAlign: "right" }}>
-              {row.actual.toFixed(2)}
-            </div>
-            <div style={{ color: colors.textSecondary, fontSize: 12, textAlign: "right" }}>
-              {row.previous.toFixed(2)}
-            </div>
-            <div
-              style={{
-                color: row.delta >= 0 ? "#00C49A" : "#FF6B6B",
-                fontSize: 12,
-                textAlign: "right",
-                fontWeight: row.isCritical ? 600 : 400,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "flex-end",
-                gap: 4,
-              }}
-            >
-              {row.delta >= 0 ? "+" : ""}
-              {row.delta.toFixed(2)}
-              {row.isCritical && <Flag size={11} color="#FF6B6B" />}
+      {/* Cobertura de la Base de Datos */}
+      <div style={{ ...card, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Database size={18} color={colors.accent} />
+          <div style={{ color: colors.textPrimary, fontWeight: 600, fontSize: 14 }}>
+            Cobertura de Procesamiento de Agentes (Base de Datos)
+          </div>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div style={{ padding: 12, backgroundColor: colors.background, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: colors.textSecondary, marginBottom: 4 }}>Mensajes Totales</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: colors.textPrimary }}>
+              {data.coverage.messagesTotal.toLocaleString()}
             </div>
           </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Trend Chart Card ─────────────────────────────────────────────────────────
-function TrendChartCard() {
-  const { colors } = useTheme();
-
-  const card: React.CSSProperties = {
-    backgroundColor: colors.card,
-    borderRadius: 12,
-    border: `1px solid ${colors.border}`,
-    padding: 24,
-  };
-
-  const data = [
-    { month: "Nov", sentimiento: 0.81, intencion: 0.76 },
-    { month: "Dic", sentimiento: 0.82, intencion: 0.78 },
-    { month: "Ene", sentimiento: 0.83, intencion: 0.79 },
-    { month: "Feb", sentimiento: 0.835, intencion: 0.81 },
-    { month: "Mar", sentimiento: 0.84, intencion: 0.814 },
-    { month: "Abr", sentimiento: 0.847, intencion: 0.791 },
-  ];
-
-  return (
-    <div style={card}>
-      <div
-        style={{
-          color: colors.textSecondary,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: "0.05em",
-          marginBottom: 16,
-        }}
-      >
-        Tendencia F1 — últimos 6 meses
-      </div>
-
-      {/* Legend */}
-      <div className="flex gap-4" style={{ marginBottom: 16 }}>
-        <div className="flex items-center gap-1.5">
-          <div
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              backgroundColor: "#7F77DD",
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ color: colors.textSecondary, fontSize: 11 }}>Sentimiento</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <div
-            style={{
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              backgroundColor: "#00C49A",
-              flexShrink: 0,
-            }}
-          />
-          <span style={{ color: colors.textSecondary, fontSize: 11 }}>Intención</span>
-        </div>
-      </div>
-
-      {/* Chart */}
-      <div style={{ position: "relative", height: 240 }}>
-        {/* Y-axis reference lines */}
-        <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", justifyContent: "space-between", paddingTop: 5, paddingBottom: 25 }}>
-          {[0.9, 0.85, 0.8, 0.75, 0.7].map((val) => (
-            <div key={val} style={{ borderTop: "1px solid rgba(107,147,168,0.08)", position: "relative" }}>
-              <span style={{ position: "absolute", left: -30, top: -8, fontSize: 9, color: colors.textSecondary }}>
-                {val.toFixed(2)}
+          <div style={{ padding: 12, backgroundColor: colors.background, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: colors.textSecondary, marginBottom: 4 }}>Analizados con Sentimiento</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: "#00C49A" }}>
+              {data.coverage.withSentiment.toLocaleString()}
+              <span style={{ fontSize: 11, fontWeight: 400, color: colors.textSecondary, marginLeft: 6 }}>
+                ({data.coverage.messagesTotal > 0 ? ((data.coverage.withSentiment / data.coverage.messagesTotal) * 100).toFixed(1) : 0}%)
               </span>
             </div>
-          ))}
+          </div>
+          <div style={{ padding: 12, backgroundColor: colors.background, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: colors.textSecondary, marginBottom: 4 }}>Analizados con Intención</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: "#3b82f6" }}>
+              {data.coverage.withIntent.toLocaleString()}
+              <span style={{ fontSize: 11, fontWeight: 400, color: colors.textSecondary, marginLeft: 6 }}>
+                ({data.coverage.messagesTotal > 0 ? ((data.coverage.withIntent / data.coverage.messagesTotal) * 100).toFixed(1) : 0}%)
+              </span>
+            </div>
+          </div>
         </div>
+        {/* Barra de progreso visual */}
+        {data.coverage.messagesTotal > 0 && (
+          <div style={{ width: "100%", height: 6, backgroundColor: isDark ? "rgba(255,255,255,0.08)" : "#E2E8F0", borderRadius: 3, overflow: "hidden", display: "flex" }}>
+            <div style={{ height: "100%", width: `${(data.coverage.withSentiment / data.coverage.messagesTotal) * 100}%`, backgroundColor: "#00C49A" }} title="Sentimiento" />
+            <div style={{ height: "100%", width: `${Math.max(0, (data.coverage.withIntent - data.coverage.withSentiment) / data.coverage.messagesTotal) * 100}%`, backgroundColor: "#3b82f6" }} title="Intención" />
+          </div>
+        )}
+      </div>
 
-        {/* Bars */}
-        <div style={{ position: "absolute", inset: "5px 0 25px 0", display: "flex", alignItems: "flex-end", gap: 16, paddingLeft: 10 }}>
-          {data.map((d) => {
-            const sentHeight = ((d.sentimiento - 0.7) / (0.9 - 0.7)) * 100;
-            const intHeight = ((d.intencion - 0.7) / (0.9 - 0.7)) * 100;
+      {!data.available && (
+        <div
+          style={{
+            ...card,
+            borderColor: colors.warning,
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+          }}
+        >
+          <Info size={18} color={colors.warning} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ fontSize: 13, lineHeight: 1.5, color: colors.textPrimary }}>
+            <strong>Sin validación de datos.</strong> {data.message}
+            <p style={{ marginTop: 8, fontSize: 12, color: colors.textSecondary }}>
+              Esta pestaña muestra qué tan confiables son las métricas del dashboard. 
+              Para activarla, el equipo de datos debe correr una evaluación con datos validados (ground truth).
+              <br /><br />
+              <strong>¿Por qué importa?</strong> Si el LLM acierta poco, los insights de Frustración e Intenciones pueden ser incorrectos.
+            </p>
+          </div>
+        </div>
+      )}
 
-            return (
-              <div key={d.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
-                <div style={{ width: "100%", display: "flex", gap: 4, alignItems: "flex-end", height: "100%" }}>
-                  <div
-                    style={{
-                      flex: 1,
-                      height: `${sentHeight}%`,
-                      backgroundColor: "#7F77DD",
-                      borderRadius: "4px 4px 0 0",
-                      minHeight: 4,
-                    }}
-                  />
-                  <div
-                    style={{
-                      flex: 1,
-                      height: `${intHeight}%`,
-                      backgroundColor: "#00C49A",
-                      borderRadius: "4px 4px 0 0",
-                      minHeight: 4,
-                    }}
-                  />
-                </div>
-                <span style={{ fontSize: 10, color: colors.textSecondary, marginTop: 4 }}>{d.month}</span>
+      {report?.coverage_pct != null && report.coverage_pct < 100 && (
+        <div
+          role="status"
+          style={{
+            borderRadius: 8,
+            padding: "10px 14px",
+            fontSize: 12,
+            border: `1px solid ${colors.warning}`,
+            background: isDark ? "rgba(245,166,35,0.08)" : "rgba(232,146,10,0.08)",
+            color: colors.textPrimary,
+          }}
+        >
+          Cobertura de labels del pipeline: <strong>{report.coverage_pct}%</strong> de filas
+          evaluadas ({report.rows_with_labels ?? 0} / {report.rows_evaluated ?? 0}). Completá el análisis de emociones y solicitudes para ver métricas completas.
+        </div>
+      )}
+
+      {report?.alerts?.map((alert) => (
+        <div
+          key={alert}
+          style={{
+            backgroundColor: isDark ? "rgba(245,166,35,0.08)" : "rgba(232,146,10,0.08)",
+            border: `1px solid ${colors.warning}`,
+            borderRadius: 8,
+            padding: "10px 14px",
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+          }}
+        >
+          <AlertCircle size={16} color={colors.warning} style={{ flexShrink: 0, marginTop: 2 }} />
+          <div style={{ color: colors.warning, fontSize: 12, lineHeight: 1.5 }}>{alert}</div>
+        </div>
+      ))}
+
+      {data.available && report && (
+        <>
+          <div style={card}>
+            <div className="flex items-center justify-between flex-wrap gap-4" style={{ marginBottom: 20 }}>
+              <div
+                style={{
+                  color: colors.textSecondary,
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.05em",
+                }}
+              >
+                ¿Qué tan confiables son los datos del dashboard?
               </div>
-            );
-          })}
+              <div className="flex items-center gap-3 flex-wrap">
+                <button
+                   type="button"
+                   disabled={isEvaluating}
+                   onClick={handleRecalculate}
+                   style={{
+                     fontSize: 11,
+                     padding: "6px 14px",
+                     borderRadius: 20,
+                     cursor: isEvaluating ? "not-allowed" : "pointer",
+                     backgroundColor: isEvaluating ? colors.border : colors.accent,
+                     color: "#fff",
+                     border: "none",
+                     display: "flex",
+                     alignItems: "center",
+                     gap: 6,
+                     fontWeight: 500,
+                   }}
+                 >
+                   {isEvaluating ? (
+                     <>
+                       <Loader2 size={12} className="animate-spin" />
+                       Evaluando...
+                     </>
+                   ) : (
+                     <>
+                       <RefreshCw size={12} />
+                       Recalcular Calidad
+                     </>
+                   )}
+                 </button>
+
+                <div className="flex gap-1" style={{ borderLeft: `1px solid ${colors.border}`, paddingLeft: 12 }}>
+                  {(["ALL", "ES", "PT"] as LangFilter[]).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setLang(tab)}
+                      style={{
+                        fontSize: 11,
+                        padding: "4px 12px",
+                        borderRadius: 20,
+                        cursor: "pointer",
+                        backgroundColor:
+                          lang === tab ? "rgba(0,196,154,0.12)" : "transparent",
+                        color: lang === tab ? colors.accent : colors.textSecondary,
+                        border: `1px solid ${lang === tab ? colors.accent : colors.border}`,
+                      }}
+                    >
+                      {tab === "ALL" ? "Todos" : tab}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {[
+                {
+                  label: "El bot entiende el estado emocional",
+                  value: region?.sentiment_agreement ?? report.sentiment_agreement,
+                  delta: region?.sentiment_delta,
+                  degraded:
+                    (region?.sentiment_agreement ?? 1) < 0.7 ||
+                    (region?.sentiment_delta ?? 0) < -0.05,
+                },
+                {
+                  label: "El bot clasifica bien las solicitudes",
+                  value: region?.intent_accuracy ?? report.intent_accuracy,
+                  delta: region?.intent_delta,
+                  degraded: (region?.intent_accuracy ?? 1) < 0.65,
+                },
+                {
+                  label: "Solicitudes ambiguas (baja confianza)",
+                  value: report.low_confidence_pct != null ? report.low_confidence_pct / 100 : null,
+                  delta: null,
+                  degraded: (report.low_confidence_pct ?? 0) > 15,
+                  isPct: true,
+                },
+              ].map((m) => (
+                <div
+                  key={m.label}
+                  style={{
+                    backgroundColor: m.degraded
+                      ? "rgba(255,107,107,0.03)"
+                      : colors.background,
+                    borderRadius: 8,
+                    padding: 12,
+                    border: m.degraded ? "1px solid #FF6B6B" : "none",
+                  }}
+                >
+                  <div style={{ color: colors.textSecondary, fontSize: 11, marginBottom: 8 }}>
+                    {m.label}
+                    {region && lang !== "ALL" && (
+                      <span style={{ opacity: 0.7 }}> · n={region.n}</span>
+                    )}
+                  </div>
+                  <div
+                    style={{
+                      color: m.degraded ? "#FF6B6B" : colors.textPrimary,
+                      fontSize: 24,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {m.isPct
+                      ? m.value != null
+                        ? `${(m.value * 100).toFixed(1)}%`
+                        : "—"
+                      : pct(m.value as number)}
+                  </div>
+                  {m.delta != null && (
+                    <div style={{ fontSize: 11, color: m.delta >= 0 ? "#00C49A" : "#FF6B6B", marginTop: 6 }}>
+                      Δ vs período anterior: {deltaStr(m.delta)}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div style={card}>
+              <div
+                style={{
+                  color: colors.textSecondary,
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  marginBottom: 16,
+                }}
+              >
+                Precisión por tipo de solicitud
+              </div>
+              {intentRows.length === 0 ? (
+                <p style={{ fontSize: 12, color: colors.textSecondary }}>Sin datos por tipo de solicitud.</p>
+              ) : (
+                intentRows.map((row, i) => {
+                  const critical = row.actual < 0.7;
+                  return (
+                    <div
+                      key={row.intent}
+                      className="grid grid-cols-3 gap-4"
+                      style={{
+                        padding: "10px 12px",
+                        backgroundColor: i % 2 === 0 ? colors.card : colors.background,
+                        borderRadius: 4,
+                      }}
+                    >
+                      <span style={{ fontSize: 12, color: colors.textPrimary }}>{row.intent}</span>
+                      <span style={{ fontSize: 12, textAlign: "right" }}>{row.actual.toFixed(3)}</span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          textAlign: "right",
+                          color: critical ? "#FF6B6B" : colors.textSecondary,
+                          display: "flex",
+                          justifyContent: "flex-end",
+                          gap: 4,
+                          alignItems: "center",
+                        }}
+                      >
+                        n={row.n}
+                        {critical && <Flag size={11} color="#FF6B6B" />}
+                      </span>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            <div style={card}>
+              <div
+                style={{
+                  color: colors.textSecondary,
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  marginBottom: 16,
+                }}
+              >
+                Historial de calidad (snapshots)
+              </div>
+              {data.history.length < 2 ? (
+                <p style={{ fontSize: 12, color: colors.textSecondary }}>
+                  Se mostrará tendencia tras varias evaluaciones mensuales en{" "}
+                  el sistema de seguimiento.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {data.history.map((h) => (
+                    <div
+                      key={h.period}
+                      className="flex justify-between text-sm"
+                      style={{ color: colors.textPrimary }}
+                    >
+                      <span>{h.period}</span>
+                      <span>
+                        Emoción: {pct(h.sentiment_agreement)} · Solicitudes: {pct(h.intent_accuracy)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {breakdown && (
+            <div style={card}>
+              <div
+                style={{
+                  color: colors.textSecondary,
+                  fontSize: 11,
+                  textTransform: "uppercase",
+                  marginBottom: 16,
+                }}
+              >
+                Acuerdo por etiqueta de sentimiento · {lang === "PT" ? "PT" : "ES"}
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                {Object.entries(breakdown).map(([label, stats]) => (
+                  <div
+                    key={label}
+                    style={{
+                      textAlign: "center",
+                      padding: 12,
+                      borderRadius: 8,
+                      background: colors.background,
+                    }}
+                  >
+                    <div style={{ fontSize: 10, color: colors.textSecondary, marginBottom: 6 }}>
+                      {label}
+                    </div>
+                    <div style={{ fontSize: 20, fontWeight: 600, color: colors.accent }}>
+                      {stats.agreement != null ? stats.agreement.toFixed(3) : "—"}
+                    </div>
+                    <div style={{ fontSize: 10, color: colors.textSecondary }}>n={stats.n}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Historial de Auditoría de Ingestas */}
+      <div style={card}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <History size={18} color={colors.accent} />
+          <div style={{ color: colors.textPrimary, fontWeight: 600, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.05em" }}>
+            Auditoría de Ingestas y Ejecuciones del Pipeline (Últimas 5)
+          </div>
         </div>
-      </div>
-    </div>
-  );
-}
+        
+        {data.runs.length === 0 ? (
+          <p style={{ fontSize: 12, color: colors.textSecondary }}>No hay registros de ejecuciones del pipeline en la base de datos.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${colors.border}`, color: colors.textSecondary, textAlign: "left" }}>
+                  <th style={{ padding: "8px 12px", fontWeight: 500 }}>ID Run</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500 }}>Archivo Corpus</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500 }}>Inicio</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500 }}>Fin / Duración</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500, textAlign: "right" }}>Mensajes</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500, textAlign: "right" }}>Sesiones</th>
+                  <th style={{ padding: "8px 12px", fontWeight: 500, textAlign: "center" }}>Estado</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.runs.map((run, i) => {
+                  const isRunning = run.status === "running";
+                  const isFailed = run.status === "failed";
+                  
+                  const statusBg = isRunning 
+                    ? "rgba(59, 130, 246, 0.1)" 
+                    : isFailed 
+                      ? "rgba(239, 68, 68, 0.1)" 
+                      : "rgba(16, 185, 129, 0.1)";
+                      
+                  const statusColor = isRunning 
+                    ? "#3b82f6" 
+                    : isFailed 
+                      ? "#ef4444" 
+                      : "#10b981";
 
-// ─── Recall Grid Card ─────────────────────────────────────────────────────────
-function RecallGridCard() {
-  const { colors } = useTheme();
+                  const statusLabel = isRunning 
+                    ? "Corriendo" 
+                    : isFailed 
+                      ? "Fallido" 
+                      : "Completado";
 
-  const card: React.CSSProperties = {
-    backgroundColor: colors.card,
-    borderRadius: 12,
-    border: `1px solid ${colors.border}`,
-    padding: 24,
-  };
+                  const duration = run.started_at && run.completed_at
+                    ? `${Math.round((new Date(run.completed_at).getTime() - new Date(run.started_at).getTime()) / 1000)}s`
+                    : "—";
 
-  const recalls = [
-    { label: "Positivo ES", value: "0.91", color: colors.accent, isDegraded: false },
-    { label: "Neutro ES", value: "0.87", color: colors.accent, isDegraded: false },
-    { label: "Frustración ES", value: "0.79", color: colors.warning, isDegraded: false },
-    { label: "Positivo PT", value: "0.88", color: colors.accent, isDegraded: false },
-    { label: "Neutro PT", value: "0.76", color: colors.warning, isDegraded: false },
-    { label: "Frustración PT", value: "0.61 ⚑", color: colors.error, isDegraded: true },
-  ];
-
-  return (
-    <div style={card}>
-      <div
-        style={{
-          color: colors.textSecondary,
-          fontSize: 11,
-          textTransform: "uppercase",
-          letterSpacing: "0.05em",
-          marginBottom: 16,
-        }}
-      >
-        Recall por clase de sentimiento · ES y PT
-      </div>
-
-      <div className="grid grid-cols-6 gap-4">
-        {recalls.map((r) => (
-          <div
-            key={r.label}
-            style={{
-              backgroundColor: r.isDegraded ? "rgba(255,107,107,0.03)" : colors.background,
-              borderRadius: 8,
-              padding: "12px 10px",
-              textAlign: "center",
-              border: r.isDegraded ? "1px solid #FF6B6B" : "none",
-            }}
-          >
-            <div style={{ color: colors.textSecondary, fontSize: 10, marginBottom: 8 }}>
-              {r.label}
-            </div>
-            <div
-              style={{
-                color: r.color,
-                fontSize: 20,
-                fontWeight: 600,
-              }}
-            >
-              {r.value}
-            </div>
+                  return (
+                    <tr key={run.id} style={{ borderBottom: `1px solid ${colors.border}`, backgroundColor: i % 2 === 0 ? "transparent" : isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.01)" }}>
+                      <td style={{ padding: "10px 12px", fontFamily: "monospace", color: colors.textPrimary }}>#{run.id}</td>
+                      <td style={{ padding: "10px 12px", color: colors.textPrimary }} title={run.corpus_file}>
+                        {run.corpus_file ? run.corpus_file.split("/").pop() : "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px", color: colors.textSecondary }}>
+                        {run.started_at ? new Date(run.started_at).toLocaleString("es") : "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px", color: colors.textSecondary }}>
+                        {run.completed_at ? `${new Date(run.completed_at).toLocaleTimeString("es")} (${duration})` : isRunning ? "En progreso..." : "—"}
+                      </td>
+                      <td style={{ padding: "10px 12px", color: colors.textPrimary, textAlign: "right" }}>
+                        {run.total_messages?.toLocaleString() || 0}
+                      </td>
+                      <td style={{ padding: "10px 12px", color: colors.textPrimary, textAlign: "right" }}>
+                        {run.total_sessions?.toLocaleString() || 0}
+                      </td>
+                      <td style={{ padding: "10px 12px", textAlign: "center" }}>
+                        <span style={{ 
+                          display: "inline-block", 
+                          padding: "3px 8px", 
+                          borderRadius: 12, 
+                          fontSize: 10, 
+                          fontWeight: 600, 
+                          backgroundColor: statusBg, 
+                          color: statusColor 
+                        }}>
+                          {statusLabel}
+                        </span>
+                        {run.error_message && (
+                          <div style={{ color: "#ef4444", fontSize: 9, marginTop: 4, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={run.error_message}>
+                            {run.error_message}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
-        ))}
+        )}
       </div>
-    </div>
-  );
-}
-
-// ─── Full Page ────────────────────────────────────────────────────────────────
-export function ModelMetricsPage() {
-  const { colors } = useTheme();
-
-  return (
-    <DashboardShell sidebar={<Sidebar activeItem="Métricas modelo" />} mainClassName="space-y-4">
-          {/* Breadcrumb */}
-          <nav className="flex items-center gap-1" style={{ fontSize: 12 }}>
-            <Link
-              href="/"
-              style={{ color: colors.textSecondary, textDecoration: "none" }}
-              className="hover:text-white transition-colors"
-            >
-              Dashboard
-            </Link>
-            <span style={{ color: colors.textSecondary, margin: "0 4px" }}>›</span>
-            <span style={{ color: colors.textPrimary }}>Métricas del modelo</span>
-          </nav>
-
-          {/* Page Header */}
-          <div className="flex items-start justify-between">
-            <div>
-              <h1 style={{ color: colors.textPrimary, fontSize: 18, fontWeight: 600, margin: 0 }}>
-                Métricas del modelo
-              </h1>
-              <p style={{ color: colors.textSecondary, fontSize: 11, margin: "4px 0 0 0" }}>
-                Corpus: abril 2025 · 2.13M mensajes
-              </p>
-            </div>
-            <div
-              style={{
-                color: colors.textSecondary,
-                fontSize: 11,
-                border: `1px solid ${colors.textSecondary}`,
-                borderRadius: 20,
-                padding: "4px 12px",
-              }}
-            >
-              Comparando con: marzo 2025
-            </div>
-          </div>
-
-          {/* Alert Banner */}
-          <AlertBanner />
-
-          {/* Global Metrics */}
-          <GlobalMetricsCard />
-
-          {/* Two-column grid */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <AccuracyTableCard />
-            <TrendChartCard />
-          </div>
-
-          {/* Recall Grid */}
-          <RecallGridCard />
     </DashboardShell>
   );
 }

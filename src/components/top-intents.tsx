@@ -43,7 +43,7 @@ export function TopIntents({ data }: { data?: TopIntent[] }) {
   const items: IntentItem[] = data && data.length > 0 
     ? data.map(d => ({
         name: d.intent.replace(/_/g, " ").replace(/\b\w/g, l => l.toUpperCase()),
-        count: `${d.count} sesiones`,
+        count: `${d.count} clientes`,
         badge: d.count >= 3 ? "crítico" : d.count === 2 ? "medio" : "bajo",
       }))
     : fallbackItems;
@@ -69,7 +69,7 @@ export function TopIntents({ data }: { data?: TopIntent[] }) {
           marginBottom: 16,
         }}
       >
-        TOP INTENCIONES SIN RESOLVER
+        SOLICITUDES MÁS FRECUENTES SIN ATENDER
       </div>
       <div style={{ display: "flex", flexDirection: "column", flex: 1 }}>
         {items.map((it, idx) => {
@@ -115,7 +115,7 @@ export function TopIntents({ data }: { data?: TopIntent[] }) {
           ) : (
             <div
               key={it.name}
-              className="flex items-center justify-between"
+              className="flex items-center justify-between hover:opacity-80 transition-opacity"
               style={{
                 borderBottom: idx < items.length - 1 ? `1px solid ${colors.border}` : "none",
                 flex: 1,
@@ -129,7 +129,7 @@ export function TopIntents({ data }: { data?: TopIntent[] }) {
         })}
       </div>
       <div style={{ color: colors.accent, fontSize: 11, marginTop: "auto" }}>
-        Click en una intención para ver detalle →
+        Ver detalle por solicitud →
       </div>
     </div>
   );
