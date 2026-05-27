@@ -31,6 +31,7 @@ eggs/
 .eggs/
 lib/
 lib64/
+!src/lib/
 parts/
 sdist/
 var/
@@ -270,3 +271,16 @@ service-account.json
 *.crt
 *.cer
 *.pfx
+
+# --------------------------
+# DATOS / CSV Y BORRADORES
+# --------------------------
+*.csv
+dev.log
+/data/
+/Agentes/data/
+/Agentes/scratch/
+/Agentes/reports/
+!/data/.gitkeep
+!/Agentes/data/.gitkeep
+!/Agentes/reports/.gitkeep

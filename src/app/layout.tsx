@@ -20,8 +20,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="es" className={`${inter.variable} h-full antialiased`}>
-      <body className="h-full overflow-hidden antialiased">
+    <html lang="es" className={`${inter.variable} h-full antialiased`} data-scroll-behavior="smooth">
+      <body className={`${inter.className} h-full overflow-hidden antialiased`}>
         <Providers>{children}</Providers>
       </body>
     </html>

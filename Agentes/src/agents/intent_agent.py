@@ -9,6 +9,7 @@ pero este agente la reclasifica con mayor granularidad.
 
 Cuando use_db=True, persiste resultados a Supabase.
 """
+import asyncio
 import json
 import os
 import re
@@ -20,7 +21,7 @@ import pandas as pd
 import structlog
 from pydantic import BaseModel, Field, ValidationError
 
-from src.llm_factory import get_llm
+from src.core.llm.client import get_llm
 
 log = structlog.get_logger()
 
@@ -30,16 +31,16 @@ log = structlog.get_logger()
 class IntentLabel(StrEnum):
     """Catálogo de intenciones del usuario."""
 
-    CONSULTA_SALDO = "consulta_saldo"
-    REPORTE_PROBLEMA = "reporte_problema"
-    SOLICITUD_REEMBOLSO = "solicitud_reembolso"
-    CAMBIO_DATOS = "cambio_datos"
-    CONSULTA_ESTADO = "consulta_estado"
-    QUEJA_SERVICIO = "queja_servicio"
-    SOLICITUD_INFO = "solicitud_info"
-    CANCELACION = "cancelacion"
     LOGISTICA_ENVIO = "logistica_envio"
+    QUEJA_SERVICIO = "queja_servicio"
     PROBLEMA_PAGO = "problema_pago"
+    DEVOLUCION_REEMBOLSO = "devolucion_reembolso"
+    CANCELACION_PEDIDO = "cancelacion_pedido"
+    SOPORTE_TECNICO = "soporte_tecnico"
+    CONSULTA_PRODUCTO = "consulta_producto"
+    CAMBIO_CONTRASENA = "cambio_contrasena"
+    FACTURACION = "facturacion"
+    ESTADO_CUENTA = "estado_cuenta"
     OTRA = "otra"
 
 
@@ -61,82 +62,69 @@ BATCH_SIZE = int(os.getenv("INTENT_BATCH_SIZE", "50"))
 # ── Prompt de clasificación ──────────────────────────────────────────────────
 
 INTENT_PROMPT = """
-Eres un UX Researcher experto en diseño conversacional para soporte al cliente
-en español LATAM y portugués brasileño.
+Clasifica la intención de cada mensaje de soporte al cliente (ES-LATAM o PT-BR).
+Catálogo: logistica_envio | queja_servicio | problema_pago | devolucion_reembolso | cancelacion_pedido | soporte_tecnico | consulta_producto | cambio_contrasena | facturacion | estado_cuenta | otra
+Si confidence<0.6 usar otra. Clasificar la intención MAS URGENTE si hay varias.
 
-Mensaje: {text}
-Intención previa del sistema: {intencion_original}
+Mensajes (JSON array):
+{batch_json}
 
-Responde SOLO con JSON válido:
-{{
-  "intent": "nombre_de_categoria",
-  "confidence": 0.0
-}}
-
-## Catálogo de Intenciones
-
-- consulta_saldo: Preguntar saldo, crédito, deuda, monto a pagar.
-- reporte_problema: Reportar error, falla, algo roto.
-- solicitud_reembolso: Pedir devolución de dinero, cargo incorrecto.
-- cambio_datos: Actualizar info personal.
-- consulta_estado: Preguntar por estado de pedido, reclamo, ticket, entrega.
-- queja_servicio: Insatisfacción general, pedir agente humano.
-- solicitud_info: Información sobre productos/servicios.
-- cancelacion: Cancelar servicio, suscripción, pedido.
-- logistica_envio: Problemas de envío, paquetes retrasados, repartidor.
-- problema_pago: Cobros incorrectos, cobros duplicados, problemas con pagos.
-- otra: No encaja en ninguna categoría (confidence < 0.6).
-
-## Reglas
-1. Si confidence < 0.6 → forzar intent="otra"
-2. Si el mensaje tiene múltiples intenciones → clasificar la MÁS URGENTE
-3. Usa la intención previa como contexto, pero reclasifica según el TEXTO
-4. "quiero cancelar mi compra" = cancelacion, no logistica_envio
-5. "exijo mi dinero de vuelta" = solicitud_reembolso, no problema_pago
+Responde ONLY con un JSON array del mismo tamaño, sin texto extra:
+[{{"intent":"...","confidence":0.0}}, ...]
 """
 
 
 # ── Clasificación con LLM ───────────────────────────────────────────────────
 
 
+MINI_BATCH = int(os.getenv("INTENT_MINI_BATCH", "10"))
+
+
 async def _classify_intent_batch(
     texts: list[str],
     intenciones_originales: list[str],
 ) -> list[IntentResult]:
-    """Clasifica intent para un batch de textos usando el LLM."""
+    """Clasifica intent para un batch de textos usando el LLM.
+    Envía MINI_BATCH mensajes por llamada para reducir uso de tokens.
+    """
     llm = get_llm(role="smart")
     results: list[IntentResult] = []
 
-    for text, intencion in zip(texts, intenciones_originales):
+    for chunk_start in range(0, len(texts), MINI_BATCH):
+        chunk_texts = texts[chunk_start:chunk_start + MINI_BATCH]
+        chunk_intenciones = intenciones_originales[chunk_start:chunk_start + MINI_BATCH]
+        batch_items = [
+            {"id": i, "text": t[:400], "intent_prev": ic}
+            for i, (t, ic) in enumerate(zip(chunk_texts, chunk_intenciones))
+        ]
+        prompt = INTENT_PROMPT.format(batch_json=json.dumps(batch_items, ensure_ascii=False))
         try:
-            prompt = INTENT_PROMPT.format(
-                text=text, intencion_original=intencion,
-            )
             response = llm.invoke(prompt)
             content = response.content if hasattr(response, "content") else str(response)
-
-            parsed = json.loads(content)
-            intent_str = parsed.get("intent", "otra")
-            confidence = parsed.get("confidence", 0.0)
-
-            if confidence < 0.6:
-                intent_str = "otra"
-
-            try:
-                intent_label = IntentLabel(intent_str)
-            except ValueError:
-                intent_label = IntentLabel.OTRA
-                log.warning("intent_label_invalido", label=intent_str)
-
-            result = IntentResult(
-                intent_label=intent_label,
-                intent_confidence=confidence,
-            )
-        except (json.JSONDecodeError, ValidationError, Exception) as e:
-            log.warning("intent_parse_error", text=text[:50], error=str(e))
-            # Fallback: usar la intención original del CSV
-            result = _fallback_from_original(intencion)
-        results.append(result)
+            raw = json.loads(content)
+            if not isinstance(raw, list):
+                raise ValueError("expected list")
+            for idx_item, item in enumerate(raw):
+                try:
+                    intent_str = item.get("intent", "otra")
+                    confidence = float(item.get("confidence", 0.5))
+                    if confidence < 0.6:
+                        intent_str = "otra"
+                    try:
+                        intent_label = IntentLabel(intent_str)
+                    except ValueError:
+                        intent_label = IntentLabel.OTRA
+                    results.append(IntentResult(intent_label=intent_label, intent_confidence=confidence))
+                except Exception:
+                    fallback_intencion = chunk_intenciones[idx_item] if idx_item < len(chunk_intenciones) else "otra"
+                    results.append(_fallback_from_original(fallback_intencion))
+            if len(results) < chunk_start + len(chunk_texts):
+                for i in range(chunk_start + len(chunk_texts) - len(results)):
+                    results.append(_fallback_from_original(chunk_intenciones[i] if i < len(chunk_intenciones) else "otra"))
+        except Exception as e:
+            log.warning("intent_chunk_failed", error=str(e), chunk_start=chunk_start)
+            for ic in chunk_intenciones:
+                results.append(_fallback_from_original(ic))
 
     return results
 
@@ -208,21 +196,62 @@ async def run_intent_analysis(
     path = Path(processed_path)
     if not path.exists():
         raise FileNotFoundError(f"Corpus no encontrado: {path}")
-
-    log.info("intent_starting", processed_path=str(path))
-
     df = pd.read_json(path, lines=True)
 
-    # Inicializar columnas
-    df["intent_label"] = None
-    df["intent_confidence"] = None
-    df["resolved"] = None
+    # Inicializar columnas si no existen
+    if "intent_label" not in df.columns:
+        df["intent_label"] = None
+    if "intent_confidence" not in df.columns:
+        df["intent_confidence"] = None
+    if "resolved" not in df.columns:
+        df["resolved"] = None
 
-    # Clasificar todos los turnos
-    texts = df["text_clean"].tolist()
-    intenciones = df.get("intencion_original", pd.Series("otra", index=df.index)).fillna("otra").tolist()
+    if use_db:
+        from src.db.supabase_client import get_supabase
+        sb = get_supabase()
+        
+        session_ids = df["session_id"].unique().tolist()
+        db_rows = []
+        chunk_size = 100
+        for i in range(0, len(session_ids), chunk_size):
+            chunk = session_ids[i : i + chunk_size]
+            res = sb.table("messages").select(
+                "session_id,turn_id,intent_label,intent_confidence,resolved"
+            ).in_("session_id", chunk).execute()
+            if res.data:
+                db_rows.extend(res.data)
+                
+        if db_rows:
+            db_df = pd.DataFrame(db_rows)
+            df = df.merge(db_df, on=["session_id", "turn_id"], how="left", suffixes=("_local", ""))
+            for col in ["intent_label", "intent_confidence", "resolved"]:
+                local_col = f"{col}_local"
+                if local_col in df.columns:
+                    df[col] = df[col].fillna(df[local_col])
+                    df.drop(columns=[local_col], inplace=True)
 
-    if texts:
+    log.info("intent_starting", processed_path=str(path), rows=len(df))
+
+    # Solo procesar filas sin label (resume desde donde se cortó)
+    pending_mask = df["intent_label"].isna()
+    pending_indices = df.index[pending_mask].tolist()
+    already_done = len(df) - len(pending_indices)
+    if already_done > 0:
+        log.info("intent_resuming", already_labeled=already_done, pending=len(pending_indices))
+
+    if pending_indices:
+        texts = df.loc[pending_indices, "text_clean"].tolist()
+        intenciones = (
+            df.loc[pending_indices]
+            .get("intencion_original", pd.Series("otra", index=pending_indices))
+            .fillna("otra")
+            .tolist()
+        )
+
+        output_dir_early = Path("data/processed")
+        output_dir_early.mkdir(parents=True, exist_ok=True)
+        _enriched_path = output_dir_early / "enriched_corpus.jsonl"
+
         all_results: list[IntentResult] = []
         for i in range(0, len(texts), BATCH_SIZE):
             batch_texts = texts[i : i + BATCH_SIZE]
@@ -232,15 +261,24 @@ async def run_intent_analysis(
             log.info(
                 "intent_batch_done",
                 batch_num=i // BATCH_SIZE + 1,
-                processed=len(all_results),
-                total=len(texts),
+                processed=already_done + len(all_results),
+                total=len(df),
             )
-
-        for idx, result in enumerate(all_results):
-            df.at[idx, "intent_label"] = (
-                result.intent_label.value if result.intent_label else None
-            )
-            df.at[idx, "intent_confidence"] = result.intent_confidence
+            # Guardar progreso al final de cada batch
+            batch_end = min(i + BATCH_SIZE, len(texts))
+            for list_i, df_idx in enumerate(pending_indices[i:batch_end]):
+                res = all_results[i + list_i]
+                df.at[df_idx, "intent_label"] = (
+                    res.intent_label.value if res.intent_label else None
+                )
+                df.at[df_idx, "intent_confidence"] = res.intent_confidence
+            with open(_enriched_path, "w", encoding="utf-8") as _f:
+                for _, _row in df.iterrows():
+                    _f.write(json.dumps(_row.to_dict(), ensure_ascii=False, default=str) + "\n")
+            log.info("intent_progress_saved", labeled=already_done + len(all_results), total=len(df))
+            delay = float(os.getenv("LLM_BATCH_DELAY_SEC", "2"))
+            if delay > 0 and i + BATCH_SIZE < len(texts):
+                await asyncio.sleep(delay)
 
     # Detectar resolución por sesión
     for _, session_df in df.groupby("session_id"):
@@ -269,7 +307,7 @@ async def run_intent_analysis(
 
 
 async def _persist_intent_to_db(df: pd.DataFrame) -> None:
-    """Actualiza las columnas de intent en Supabase."""
+    """Actualiza las columnas de intent en Supabase usando batch upsert."""
     from src.db.supabase_client import get_supabase
 
     sb = get_supabase()
@@ -280,27 +318,28 @@ async def _persist_intent_to_db(df: pd.DataFrame) -> None:
 
     log.info("db_intent_updating", count=len(user_df))
 
+    # 1. Agrupar y subir mensajes en batches
+    message_rows = []
     for _, row in user_df.iterrows():
         confidence = row.get("intent_confidence")
         resolved_val = row.get("resolved")
-        update_data = {
+        message_rows.append({
+            "session_id": row["session_id"],
+            "turn_id": int(row["turn_id"]),
             "intent_label": str(row["intent_label"]) if row.get("intent_label") else None,
-            "intent_confidence": (
-                float(confidence)
-                if confidence is not None and str(confidence) != "nan"
-                else None
-            ),
-            "resolved": (
-                bool(resolved_val)
-                if resolved_val is not None and str(resolved_val) != "nan"
-                else None
-            ),
-        }
-        sb.table("messages").update(update_data).eq(
-            "session_id", row["session_id"]
-        ).eq("turn_id", int(row["turn_id"])).execute()
+            "intent_confidence": float(confidence) if confidence is not None and str(confidence) != "nan" else None,
+            "resolved": bool(resolved_val) if resolved_val is not None and str(resolved_val) != "nan" else None,
+        })
 
-    # Actualizar sessions
+    batch_size = 500
+    for i in range(0, len(message_rows), batch_size):
+        sb.table("messages").upsert(
+            message_rows[i : i + batch_size],
+            on_conflict="session_id,turn_id"
+        ).execute()
+
+    # 2. Agrupar y subir sesiones en batches
+    session_rows = []
     for session_id, session_df in df.groupby("session_id"):
         with_intent = session_df[session_df["intent_label"].notna()]
         if with_intent.empty:
@@ -316,12 +355,20 @@ async def _persist_intent_to_db(df: pd.DataFrame) -> None:
             else None
         )
 
-        sb.table("sessions").update({
+        session_rows.append({
+            "id": session_id,
             "dominant_intent": dominant,
             "resolution_rate": res_rate,
-        }).eq("id", session_id).execute()
+        })
 
-    log.info("db_intent_updated")
+    session_batch_size = 200
+    for i in range(0, len(session_rows), session_batch_size):
+        sb.table("sessions").upsert(
+            session_rows[i : i + session_batch_size],
+            on_conflict="id"
+        ).execute()
+
+    log.info("db_intent_updated", messages=len(message_rows), sessions=len(session_rows))
 
 
 # ── Ranking de intenciones no resueltas ──────────────────────────────────────

@@ -31,7 +31,7 @@ export function TrendChart({ data: initialData }: { data?: TrendData[] }) {
             letterSpacing: "0.05em",
           }}
         >
-          TENDENCIA DE FRUSTRACIÓN — ÚLTIMOS 6 MESES
+          EVOLUCIÓN DE LA FRICCIÓN — ÚLTIMOS 6 MESES
         </div>
         {/* Legend */}
         <div className="flex gap-4">
@@ -76,8 +76,8 @@ export function TrendChart({ data: initialData }: { data?: TrendData[] }) {
             const ptHeight = (d.pt / maxVal) * 100;
 
             return (
-              <div key={d.month} style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 4, height: "100%" }}>
-                <div style={{ width: "100%", display: "flex", gap: 4, alignItems: "flex-end", height: "100%" }}>
+              <div key={d.month} style={{ flex: 1, position: "relative", height: "100%" }}>
+                <div style={{ width: "100%", height: "100%", display: "flex", gap: 4, alignItems: "flex-end" }}>
                   <div
                     style={{
                       flex: 1,
@@ -85,6 +85,7 @@ export function TrendChart({ data: initialData }: { data?: TrendData[] }) {
                       backgroundColor: "#1A8FE3",
                       borderRadius: "3px 3px 0 0",
                       minHeight: 4,
+                      transition: "height 0.3s ease",
                     }}
                   />
                   <div
@@ -94,10 +95,13 @@ export function TrendChart({ data: initialData }: { data?: TrendData[] }) {
                       backgroundColor: colors.accent,
                       borderRadius: "3px 3px 0 0",
                       minHeight: 4,
+                      transition: "height 0.3s ease",
                     }}
                   />
                 </div>
-                <span style={{ fontSize: 10, color: colors.textMuted, marginTop: 4 }}>{d.month}</span>
+                <span style={{ position: "absolute", bottom: -20, left: "50%", transform: "translateX(-50%)", fontSize: 10, color: colors.textMuted }}>
+                  {d.month}
+                </span>
               </div>
             );
           })}

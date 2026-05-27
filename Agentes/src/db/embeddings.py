@@ -12,6 +12,7 @@ Uso:
     # vectors[0] -> [0.023, -0.119, ...] (1024 dimensiones)
 """
 import os
+from collections.abc import Callable
 from typing import Literal
 
 import cohere
@@ -51,6 +52,7 @@ def _get_cohere_client() -> cohere.ClientV2:
 def embed_texts(
     texts: list[str],
     input_type: InputType = "search_document",
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> list[list[float]]:
     """
     Genera embeddings para una lista de textos usando Cohere.
@@ -93,6 +95,8 @@ def embed_texts(
             processed=len(all_embeddings),
             total=len(texts),
         )
+        if on_progress:
+            on_progress(len(all_embeddings), len(texts))
 
     log.info("embeddings_generated", count=len(all_embeddings))
     return all_embeddings

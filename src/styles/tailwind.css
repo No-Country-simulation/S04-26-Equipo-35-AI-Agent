@@ -1,6 +1,12 @@
-@import "./fonts.css";
 @import "tailwindcss" source(none);
 @source "../**/*.{js,ts,jsx,tsx}";
 
+html {
+  scroll-behavior: smooth;
+}
+
+@theme {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";
+}
 @import "tw-animate-css";
 @import "./theme.css";

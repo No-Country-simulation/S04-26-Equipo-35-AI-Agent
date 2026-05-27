@@ -1,5 +1,5 @@
 "use client";
-import { LayoutDashboard, AlertTriangle, Target, Upload, Activity, History, FileText } from "lucide-react";
+import { LayoutDashboard, AlertTriangle, Target, Upload, Activity, History, FileText, Kanban, Sun, Moon } from "lucide-react";
 
 import Link from "next/link";
 import { useTheme } from "../context/theme-context";
@@ -11,17 +11,36 @@ function MenuItem({ item }: { item: Item }) {
   return (
     <Link
       href={item.href}
-      className="flex items-center gap-2.5 px-3 py-2 cursor-pointer no-underline"
+      className="flex items-center gap-2.5 mx-2 px-3 py-2 cursor-pointer no-underline transition-all duration-150"
       style={{
-        color: item.active ? colors.textPrimary : colors.textSecondary,
-        backgroundColor: item.active ? colors.cardHover : "transparent",
-        borderLeft: item.active ? `2px solid ${colors.accent}` : "2px solid transparent",
-        fontSize: 12,
+        color: item.active ? "#fafafa" : colors.textSecondary,
+        backgroundColor: item.active ? "rgba(99,102,241,0.15)" : "transparent",
+        borderRadius: 6,
+        fontSize: 12.5,
+        fontWeight: item.active ? 500 : 400,
       }}
     >
-      {item.icon}
+      <span style={{ color: item.active ? "#818cf8" : colors.textMuted }}>
+        {item.icon}
+      </span>
       <span>{item.label}</span>
     </Link>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  const { colors } = useTheme();
+  return (
+    <div style={{
+      color: colors.textMuted,
+      fontSize: 10,
+      fontWeight: 600,
+      textTransform: "uppercase",
+      letterSpacing: "0.08em",
+      padding: "14px 18px 6px",
+    }}>
+      {children}
+    </div>
   );
 }
 
@@ -34,63 +53,69 @@ export function Sidebar({ activeItem = "Resumen" }: SidebarProps) {
   const producto: Item[] = [
     { label: "Resumen", icon: <LayoutDashboard size={14} />, active: activeItem === "Resumen", href: "/" },
     { label: "Frustración", icon: <AlertTriangle size={14} />, active: activeItem === "Frustración", href: "/frustracion" },
-    { label: "Intenciones", icon: <Target size={14} />, active: activeItem === "Intenciones", href: "/intenciones" },
+    { label: "Solicitudes", icon: <Target size={14} />, active: activeItem === "Solicitudes", href: "/intenciones" },
+    { label: "Acciones", icon: <Kanban size={14} />, active: activeItem === "Acciones", href: "/acciones" },
     { label: "Reportes", icon: <FileText size={14} />, active: activeItem === "Reportes", href: "/reportes" },
   ];
   const analista: Item[] = [
-    { label: "Cargar corpus", icon: <Upload size={14} />, active: activeItem === "Cargar corpus", href: "/corpus/cargar" },
+    { label: "Pipeline datos", icon: <Upload size={14} />, active: activeItem === "Pipeline datos", href: "/corpus/cargar" },
     { label: "Métricas modelo", icon: <Activity size={14} />, active: activeItem === "Métricas modelo", href: "/metricas-modelo" },
     { label: "Historial", icon: <History size={14} />, active: activeItem === "Historial", href: "/historial" },
   ];
 
-  const sectionLabel: React.CSSProperties = {
-    color: colors.textSecondary,
-    fontSize: 11,
-    textTransform: "uppercase",
-    letterSpacing: "0.05em",
-    padding: "12px 14px 8px",
-  };
-
   return (
     <aside
-      className="flex h-full min-h-0 w-[160px] shrink-0 flex-col overflow-y-auto"
-      style={{ backgroundColor: colors.navbar, borderRight: `1px solid ${colors.border}` }}
+      className="flex h-full min-h-0 w-[220px] shrink-0 flex-col overflow-y-auto"
+      style={{ background: colors.navbar, borderRight: `1px solid ${colors.border}` }}
     >
-      <div>
-        <div style={sectionLabel}>Producto</div>
-        <div className="flex flex-col">
+      {/* Logo header */}
+      <div className="flex items-center gap-2.5 px-4 h-14 shrink-0" style={{ borderBottom: `1px solid ${colors.border}` }}>
+        <div style={{
+          width: 26,
+          height: 26,
+          borderRadius: 7,
+          background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexShrink: 0,
+        }}>
+          <span style={{ color: "#fff", fontSize: 12, fontWeight: 700 }}>C</span>
+        </div>
+        <span style={{ color: colors.textPrimary, fontSize: 14, fontWeight: 600, letterSpacing: "-0.02em" }}>
+          ConversaAI
+        </span>
+      </div>
+
+      {/* Nav items */}
+      <div className="flex-1 py-2">
+        <SectionLabel>Producto</SectionLabel>
+        <div className="flex flex-col gap-0.5">
           {producto.map((i) => <MenuItem key={i.label} item={i} />)}
         </div>
-        <div className="my-3 mx-3" style={{ borderTop: `1px solid ${colors.border}` }} />
-        <div style={sectionLabel}>Analista</div>
-        <div className="flex flex-col">
+        <div className="my-3 mx-4" style={{ borderTop: `1px solid ${colors.border}` }} />
+        <SectionLabel>Analista</SectionLabel>
+        <div className="flex flex-col gap-0.5">
           {analista.map((i) => <MenuItem key={i.label} item={i} />)}
         </div>
       </div>
 
-      {/* Footer with dark mode toggle */}
-      <div className="mt-auto p-3" style={{ borderTop: `1px solid ${colors.border}` }}>
+      {/* Footer */}
+      <div className="p-3 mx-2 mb-2 flex items-center justify-between" style={{ borderTop: `1px solid ${colors.border}` }}>
+        <span style={{ fontSize: 11, color: colors.textMuted }}>Tema</span>
         <button
           onClick={toggleTheme}
-          className="relative rounded-full transition-all mx-auto block"
+          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md transition-all"
           style={{
-            width: 44,
-            height: 24,
-            backgroundColor: isDark ? "#162D47" : "#E2E8F0",
-            border: isDark ? "1px solid #00C49A" : "1px solid #00A882",
+            background: colors.card,
+            border: `1px solid ${colors.border}`,
+            color: colors.textSecondary,
             cursor: "pointer",
-            padding: 2,
+            fontSize: 11,
           }}
         >
-          <div
-            className="rounded-full transition-transform duration-200"
-            style={{
-              width: 18,
-              height: 18,
-              backgroundColor: isDark ? "#00C49A" : "#00A882",
-              transform: isDark ? "translateX(20px)" : "translateX(0)",
-            }}
-          />
+          {isDark ? <Sun size={12} /> : <Moon size={12} />}
+          <span>{isDark ? "Light" : "Dark"}</span>
         </button>
       </div>
     </aside>

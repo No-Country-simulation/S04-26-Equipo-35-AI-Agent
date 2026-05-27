@@ -10,36 +10,159 @@ import pytest
 
 
 MOCK_CORPUS_ROWS = [
-    {"session_id": "SES-001", "timestamp": "2025-05-01 10:00:00", "speaker": "user", "text": "Hola, quiero saber mi saldo"},
-    {"session_id": "SES-001", "timestamp": "2025-05-01 10:00:30", "speaker": "bot", "text": "Bienvenido, ¿cuál es tu número de cuenta?"},
-    {"session_id": "SES-001", "timestamp": "2025-05-01 10:01:00", "speaker": "user", "text": "12345678"},
-    {"session_id": "SES-001", "timestamp": "2025-05-01 10:01:30", "speaker": "bot", "text": "Tu saldo es $150.00"},
-    {"session_id": "SES-001", "timestamp": "2025-05-01 10:02:00", "speaker": "user", "text": "Gracias, perfecto"},
-    # Sesión con frustración y escalada
-    {"session_id": "SES-002", "timestamp": "2025-05-01 11:00:00", "speaker": "user", "text": "no funciona mi app desde hace 3 días"},
-    {"session_id": "SES-002", "timestamp": "2025-05-01 11:00:30", "speaker": "bot", "text": "Lamentamos el inconveniente. ¿Puede describir el error?"},
-    {"session_id": "SES-002", "timestamp": "2025-05-01 11:01:00", "speaker": "user", "text": "ya les dije, no carga nada, qué mal servicio"},
-    {"session_id": "SES-002", "timestamp": "2025-05-01 11:01:30", "speaker": "bot", "text": "Entiendo. ¿Probó reiniciar la app?"},
-    {"session_id": "SES-002", "timestamp": "2025-05-01 11:02:00", "speaker": "user", "text": "CLARO QUE SÍ, CUÁNTAS VECES LES TENGO QUE DECIR, ESTO ES UN ROBO"},
-    # Sesión en portugués con abandono
-    {"session_id": "SES-003", "timestamp": "2025-05-01 12:00:00", "speaker": "user", "text": "quero cancelar minha assinatura"},
-    {"session_id": "SES-003", "timestamp": "2025-05-01 12:00:30", "speaker": "bot", "text": "Olá! Posso ajudar com isso."},
-    {"session_id": "SES-003", "timestamp": "2025-05-01 12:01:00", "speaker": "user", "text": "péssimo atendimento, não resolve nada"},
-    {"session_id": "SES-003", "timestamp": "2025-05-01 12:01:30", "speaker": "bot", "text": "Pode me dar mais detalhes?"},
-    # usuario no responde → abandono
+    {
+        "session_id": "SES-001",
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:01:00",
+        "region": "LATAM",
+        "intencion": "logistica_envio",
+        "nivel_frustracion": 0,
+        "texto_espanol": "Hola, quiero saber mi saldo",
+        "texto_portugues": "Olá, quero saber meu saldo",
+        "es_churn_risk": 0
+    },
+    {
+        "session_id": "SES-001",
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:02:00",
+        "region": "LATAM",
+        "intencion": "logistica_envio",
+        "nivel_frustracion": 1,
+        "texto_espanol": "Llevo días esperando y nada.",
+        "texto_portugues": "Estou há dias esperando e nada.",
+        "es_churn_risk": 0
+    },
+    {
+        "session_id": "SES-001",
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:44:00",
+        "region": "LATAM",
+        "intencion": "logistica_envio",
+        "nivel_frustracion": 2,
+        "texto_espanol": "Son pésimos repartiendo.",
+        "texto_portugues": "Quero cancelar minha compra agora!",
+        "es_churn_risk": 1
+    },
+    {
+        "session_id": "SES-002",
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:23:00",
+        "region": "BRAZIL",
+        "intencion": "problema_pago",
+        "nivel_frustracion": 0,
+        "texto_espanol": "Hola, mi pago falló.",
+        "texto_portugues": "Olá, meu pagamento falhou.",
+        "es_churn_risk": 0
+    },
+    {
+        "session_id": "SES-002",
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:24:00",
+        "region": "BRAZIL",
+        "intencion": "problema_pago",
+        "nivel_frustracion": 1,
+        "texto_espanol": "Sigo esperando mi reembolso.",
+        "texto_portugues": "Ainda espero meu reembolso.",
+        "es_churn_risk": 0
+    },
+    {
+        "session_id": "SES-002",
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:25:00",
+        "region": "BRAZIL",
+        "intencion": "problema_pago",
+        "nivel_frustracion": 2,
+        "texto_espanol": "Esto es un robo!",
+        "texto_portugues": "Exijo meu dinheiro de volta agora.",
+        "es_churn_risk": 1
+    }
 ]
 
 MOCK_PROCESSED_TURNS = [
-    {"session_id": "SES-001", "turn_id": 0, "speaker": "user", "text_clean": "hola quiero saber mi saldo", "lang": "es"},
-    {"session_id": "SES-001", "turn_id": 1, "speaker": "bot", "text_clean": "bienvenido cual es tu numero de cuenta", "lang": "es"},
-    {"session_id": "SES-001", "turn_id": 2, "speaker": "user", "text_clean": "12345678", "lang": "es"},
-    {"session_id": "SES-001", "turn_id": 3, "speaker": "bot", "text_clean": "tu saldo es $150.00", "lang": "es"},
-    {"session_id": "SES-001", "turn_id": 4, "speaker": "user", "text_clean": "gracias perfecto", "lang": "es"},
-    {"session_id": "SES-002", "turn_id": 0, "speaker": "user", "text_clean": "no funciona mi app desde hace 3 dias", "lang": "es"},
-    {"session_id": "SES-002", "turn_id": 1, "speaker": "bot", "text_clean": "lamentamos el inconveniente puede describir el error", "lang": "es"},
-    {"session_id": "SES-002", "turn_id": 2, "speaker": "user", "text_clean": "ya les dije no carga nada que mal servicio", "lang": "es"},
-    {"session_id": "SES-002", "turn_id": 3, "speaker": "bot", "text_clean": "entiendo probo reiniciar la app", "lang": "es"},
-    {"session_id": "SES-002", "turn_id": 4, "speaker": "user", "text_clean": "claro que si cuantas veces les tengo que decir esto es un robo", "lang": "es"},
+    {
+        "session_id": "SES-001",
+        "turn_id": 0,
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:01:00",
+        "region": "LATAM",
+        "lang": "es",
+        "text_clean": "hola quiero saber mi saldo",
+        "texto_espanol": "Hola, quiero saber mi saldo",
+        "texto_portugues": "Olá, quero saber meu saldo",
+        "intencion_original": "logistica_envio",
+        "nivel_frustracion": 0,
+        "es_churn_risk": False
+    },
+    {
+        "session_id": "SES-001",
+        "turn_id": 1,
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:02:00",
+        "region": "LATAM",
+        "lang": "es",
+        "text_clean": "llevo dias esperando y nada",
+        "texto_espanol": "Llevo días esperando y nada.",
+        "texto_portugues": "Estou há dias esperando e nada.",
+        "intencion_original": "logistica_envio",
+        "nivel_frustracion": 1,
+        "es_churn_risk": False
+    },
+    {
+        "session_id": "SES-001",
+        "turn_id": 2,
+        "usuario": "@miniKittyLuna",
+        "fecha": "2026-05-01 00:44:00",
+        "region": "LATAM",
+        "lang": "es",
+        "text_clean": "son pesimos repartiendo",
+        "texto_espanol": "Son pésimos repartiendo.",
+        "texto_portugues": "Quero cancelar minha compra agora!",
+        "intencion_original": "logistica_envio",
+        "nivel_frustracion": 2,
+        "es_churn_risk": True
+    },
+    {
+        "session_id": "SES-002",
+        "turn_id": 0,
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:23:00",
+        "region": "BRAZIL",
+        "lang": "pt",
+        "text_clean": "ola meu pagamento falhou",
+        "texto_espanol": "Hola, mi pago falló.",
+        "texto_portugues": "Olá, meu pagamento falhou.",
+        "intencion_original": "problema_pago",
+        "nivel_frustracion": 0,
+        "es_churn_risk": False
+    },
+    {
+        "session_id": "SES-002",
+        "turn_id": 1,
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:24:00",
+        "region": "BRAZIL",
+        "lang": "pt",
+        "text_clean": "ainda espero meu reembolso",
+        "texto_espanol": "Sigo esperando mi reembolso.",
+        "texto_portugues": "Ainda espero meu reembolso.",
+        "intencion_original": "problema_pago",
+        "nivel_frustracion": 1,
+        "es_churn_risk": False
+    },
+    {
+        "session_id": "SES-002",
+        "turn_id": 2,
+        "usuario": "@soyCoder_ai",
+        "fecha": "2026-05-04 00:25:00",
+        "region": "BRAZIL",
+        "lang": "pt",
+        "text_clean": "exijo meu dinheiro de volta agora",
+        "texto_espanol": "Esto es un robo!",
+        "texto_portugues": "Exijo meu dinheiro de volta agora.",
+        "intencion_original": "problema_pago",
+        "nivel_frustracion": 2,
+        "es_churn_risk": True
+    }
 ]
 
 
